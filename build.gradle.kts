@@ -3,8 +3,9 @@ plugins {
     application
 }
 
-group = "com.kagent"
-version = "0.1.0-SNAPSHOT"
+group = "com.cogent"
+version = "0.5.0-SNAPSHOT"
+description = "Cogent: JVM-Native Agent Execution Protocol & Runtime"
 
 repositories {
     mavenCentral()
@@ -28,5 +29,5 @@ tasks.test {
 }
 
 application {
-    mainClass.set("com.kagent.memory.MainKt")
+    mainClass.set("com.cogent.memory.MainKt")
 }

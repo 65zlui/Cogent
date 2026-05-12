@@ -1,8 +1,8 @@
-# KAgent Memory Runtime
+# Cogent
 
-> A Compose-inspired Reactive Memory Runtime for AI Agents
+> JVM-Native Agent Execution Protocol & Runtime
 
-KAgent Memory Runtime 是一个受 Jetpack Compose 和 React Fiber 启发的 Kotlin 响应式内存运行时系统。它将 UI 运行时的高级抽象（Snapshot、Derived State、Dependency Tracking、Fiber Scheduling）应用到 Agent 状态管理领域。
+Cogent (formerly kagent-memory) is a Kotlin agent runtime inspired by Jetpack Compose and React Fiber. It brings UI-runtime abstractions — Snapshot, Derived State, Dependency Tracking, Fiber Scheduling — to the Agent state management domain, providing a unified execution protocol for JVM agents.
 
 ## Quick Start
 
@@ -45,8 +45,8 @@ runtime.replayToCheckpoint("init_done")
 
 ```
 ┌─────────────────────────────────────────────────────┐
-│                  KAgentRuntime (v0.4)               │
-│              Public API / Unified Facade            │
+│                  Cogent Runtime (v0.4)               │
+│              KAgentRuntime / Public API              │
 ├─────────────────────────────────────────────────────┤
 │  Internal Subsystems (Hidden from Users):           │
 │                                                     │
@@ -256,6 +256,7 @@ Computed states that automatically recompute when dependencies change.
 | v0.2 | Reactive Layer | Dependency Graph, Derived State, Recomposition Scope, Execution Trace, Replay Engine |
 | v0.3 | Fiber Runtime | AgentScheduler, RuntimeHeart, Suspendable Derived, Auto Dependency Tracking, Fiber Tasks |
 | v0.4 | API Convergence | KAgentRuntime unified facade, hidden internals, clean public API |
+| v0.5 | Rebrand to Cogent | Package namespace `com.cogent`, project renamed, execution protocol layer |
 
 ## Building
 

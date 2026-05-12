@@ -4,8 +4,6 @@ import com.cogent.memory.core.Memory
 import com.cogent.fiber.scheduler.AgentScheduler
 import com.cogent.fiber.scheduler.RuntimeHeart
 import com.cogent.fiber.scheduler.RuntimeHeartState
-import com.cogent.fiber.scheduler.ScheduledTask
-import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.callbackFlow
 import kotlinx.coroutines.flow.map
@@ -45,8 +43,7 @@ class KAgentRuntime internal constructor(
     internal val executionBlock: suspend KAgentRuntimeScope.() -> Unit = {}
 ) {
     private val runtimeInterceptors = mutableListOf<RuntimeInterceptor>()
-    private val eventStore = mutableListOf<EventStoreEntry>()
-    private val MAX_EVENTS = 10_000
+    internal val eventStore = EventStore()
 
     // ================================================================
     // v0.4 API — unchanged, fully backward compatible
@@ -220,12 +217,7 @@ class KAgentRuntime internal constructor(
      * @param maxEvents Maximum number of events to return (default 1000).
      */
     fun trace(traceId: String, maxEvents: Int = 1000): List<RuntimeEvent> {
-        synchronized(eventStore) {
-            return eventStore
-                .filter { it.traceId == traceId }
-                .takeLast(maxEvents)
-                .map { it.event }
-        }
+        return eventStore.getEvents(traceId, maxEvents).map { it.event }
     }
 
     /**
@@ -281,12 +273,7 @@ class KAgentRuntime internal constructor(
      * Thread-safe bounded event store.
      */
     private fun storeEvent(traceId: String, event: RuntimeEvent) {
-        synchronized(eventStore) {
-            eventStore.add(EventStoreEntry(traceId, event))
-            while (eventStore.size > MAX_EVENTS) {
-                eventStore.removeAt(0)
-            }
-        }
+        eventStore.record(traceId, event)
     }
 
     /**
@@ -295,6 +282,11 @@ class KAgentRuntime internal constructor(
     fun cancel() {
         heart.cancel()
     }
+
+    /**
+     * Access the runtime debugger for execution analysis.
+     */
+    fun debugger(): RuntimeDebugger = RuntimeDebugger(eventStore, heart.getMemory())
 
     /**
      * Create a scope with current interceptors.

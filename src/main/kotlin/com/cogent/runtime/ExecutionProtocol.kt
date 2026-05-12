@@ -163,12 +163,3 @@ private val traceIdCounter = java.util.concurrent.atomic.AtomicLong(0)
 internal fun generateTraceId(): String {
     return "trace_${System.currentTimeMillis()}_${traceIdCounter.incrementAndGet()}"
 }
-
-/**
- * Stored event entry for [KAgentRuntime.trace] lookup.
- */
-internal data class EventStoreEntry(
-    val traceId: String,
-    val event: RuntimeEvent,
-    val timestamp: Long = System.currentTimeMillis()
-)

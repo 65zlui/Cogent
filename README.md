@@ -141,12 +141,18 @@ val runtime = kAgentRuntimeBuilder {
 
 | Method | Return Type | Description |
 |--------|-------------|-------------|
-| `getState(): Map<String, Any?>` | All state key-value pairs |
-| `getState<T>(key: String): T?` | Get specific state value |
-| `stateChanges(): List<StateChange>` | Execution history timeline |
-| `snapshot(): RuntimeSnapshot` | Take a snapshot of current state |
-| `replayToCheckpoint(name: String)` | Restore state to named checkpoint |
-| `cancel()` | Cancel the runtime |
+| `execute(request: AgentRequest)` | `AgentResponse` | Execute a request through the runtime (v0.5 protocol) |
+| `stream(request: AgentRequest)` | `Flow<RuntimeEvent>` | Observe execution events in real-time (v0.5) |
+| `trace(traceId: String, maxEvents: Int)` | `List<RuntimeEvent>` | Retrieve stored events by traceId (v0.5) |
+| `debugger()` | `RuntimeDebugger` | Access execution debugger for timeline/query (v0.6) |
+| `addRuntimeInterceptor(interceptor)` | `Unit` | Register protocol-level interceptor (v0.5) |
+| `addInterceptor(interceptor)` | `Unit` | Register step-level interceptor (v0.4) |
+| `getState(): Map<String, Any?>` | | All state key-value pairs |
+| `getState<T>(key: String): T?` | | Get specific state value |
+| `stateChanges(): List<StateChange>` | | Execution history timeline |
+| `snapshot(): RuntimeSnapshot` | | Take a snapshot of current state |
+| `replayToCheckpoint(name: String)` | | Restore state to named checkpoint |
+| `cancel()` | | Cancel the runtime |
 
 ### RuntimeHeartScope
 
@@ -258,6 +264,7 @@ Computed states that automatically recompute when dependencies change.
 | v0.4 | API Convergence | KAgentRuntime unified facade, hidden internals, clean public API |
 | v0.5 | Rebrand to Cogent | Package namespace `com.cogent`, project renamed |
 | v0.5.1 | Execution Protocol | AgentRequest/Response, execute/stream dual API, RuntimeInterceptor, traceId, RuntimeEvent, 16 protocol tests |
+| v0.6.0 | Timeline Engine | EventStore with monotonic stateVersion, Timeline/TimelineNode/TimelineBuilder, RuntimeDebugger (timeline/query/traceIds), 22 new tests |
 
 ## Building
 

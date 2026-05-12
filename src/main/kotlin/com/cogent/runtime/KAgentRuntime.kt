@@ -7,38 +7,54 @@ import com.cogent.fiber.scheduler.RuntimeHeartState
 import com.cogent.fiber.scheduler.ScheduledTask
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.flow.Flow
+import kotlinx.coroutines.flow.callbackFlow
 import kotlinx.coroutines.flow.map
 import kotlinx.coroutines.runBlocking
 
 /**
- * Unified Agent Runtime API (v0.4)
- * 
- * The only entry point for users. All internal modules (Scheduler, Fiber, 
- * Dependency Tracking) are hidden behind this facade.
- * 
+ * Unified Agent Runtime API (v0.5)
+ *
+ * Single entry point for all runtime operations. Provides:
+ * - [execute]/[stream] dual output paths (Execution Protocol)
+ * - [step]/[setState]/[getState] DSL for agent logic
+ * - [snapshot]/[replayToCheckpoint] for state management
+ *
  * Usage:
  * ```kotlin
  * val runtime = kAgentRuntime(id = "demo") {
- *     step("init") {
- *         setState("task", "hello")
- *         checkpoint("init_done")
+ *     run {
+ *         step("process") {
+ *             val input = getState<String>("input") ?: ""
+ *             setState("output", "hello $input")
+ *         }
  *     }
  * }
- * 
- * runtime.events.collect { event -> println(event) }
- * val snapshot = runtime.snapshot()
+ *
+ * // v0.5 protocol
+ * val resp = runtime.execute(AgentRequest(input = "world"))
+ * println(resp.output) // "hello world"
+ *
+ * // v0.4 DSL (still works)
+ * runtime.snapshot()
  * ```
  */
 class KAgentRuntime internal constructor(
     val id: String,
     private val heart: RuntimeHeart,
-    internal val interceptorList: MutableList<StepInterceptor> = mutableListOf()
+    internal val interceptorList: MutableList<StepInterceptor> = mutableListOf(),
+    internal val executionBlock: suspend KAgentRuntimeScope.() -> Unit = {}
 ) {
+    private val runtimeInterceptors = mutableListOf<RuntimeInterceptor>()
+    private val eventStore = mutableListOf<EventStoreEntry>()
+    private val MAX_EVENTS = 10_000
+
+    // ================================================================
+    // v0.4 API — unchanged, fully backward compatible
+    // ================================================================
 
     /**
-     * Register a step interceptor.
-     * Interceptors wrap each step() call in a chain (OkHttp pattern).
-     * They can observe, modify, or short-circuit execution.
+     * Register a step-level interceptor (kernel observability plane).
+     * Wraps each [KAgentRuntimeScope.step] call.
      */
     fun addInterceptor(interceptor: StepInterceptor) {
         interceptorList.add(interceptor)
@@ -57,7 +73,7 @@ class KAgentRuntime internal constructor(
         }
 
     /**
-     * Event flow for observing runtime activity
+     * Event flow for observing runtime activity (v0.4 style)
      */
     val events: Flow<AgentEvent>
         get() = heart.getScheduler().events.map { schedulerEvent ->
@@ -136,6 +152,143 @@ class KAgentRuntime internal constructor(
      */
     internal fun getHeart(): RuntimeHeart = heart
 
+    // ================================================================
+    // v0.5 Execution Protocol
+    // ================================================================
+
+    /**
+     * Register a protocol-level interceptor (control plane).
+     * Wraps the entire [execute] call.
+     */
+    fun addRuntimeInterceptor(interceptor: RuntimeInterceptor) {
+        runtimeInterceptors.add(interceptor)
+    }
+
+    /**
+     * Execute a request through the runtime.
+     *
+     * Stores [AgentRequest.input] and [AgentRequest.context] in Memory,
+     * runs the configured execution block, and returns the result.
+     *
+     * When [RuntimeInterceptor]s are registered, execution passes through
+     * the interceptor chain (OkHttp pattern) before reaching the kernel.
+     *
+     * @param request The execution request (input, context, traceId).
+     * @return AgentResponse containing the output and execution metadata.
+     */
+    suspend fun execute(request: AgentRequest): AgentResponse {
+        val traceId = request.traceId ?: generateTraceId()
+        val requestWithTrace = request.copy(traceId = traceId)
+
+        if (runtimeInterceptors.isNotEmpty()) {
+            val chain = RuntimeInterceptorChain(runtimeInterceptors, 0) { req ->
+                executeInternal(req, traceId)
+            }
+            return chain.proceed(requestWithTrace)
+        }
+
+        return executeInternal(requestWithTrace, traceId)
+    }
+
+    /**
+     * Execute a request and observe the full event stream in real-time.
+     *
+     * The returned Flow emits [RuntimeEvent] values as execution progresses:
+     * ```
+     * RunStart → StepStart → MemoryChange → ... → StepEnd → RunEnd
+     * ```
+     *
+     * Events are also stored and can be retrieved later via [trace].
+     */
+    fun stream(request: AgentRequest): Flow<RuntimeEvent> = callbackFlow {
+        val traceId = request.traceId ?: generateTraceId()
+
+        // executeWithEvents emits RunStart → ... → RunEnd via onEvent
+        executeWithEvents(request.copy(traceId = traceId), traceId) { event ->
+            storeEvent(traceId, event)
+            trySend(event)
+        }
+
+        close()
+    }
+
+    /**
+     * Retrieve stored events for a given traceId.
+     * Returns events in chronological order, newest last.
+     *
+     * @param traceId The trace identifier to look up.
+     * @param maxEvents Maximum number of events to return (default 1000).
+     */
+    fun trace(traceId: String, maxEvents: Int = 1000): List<RuntimeEvent> {
+        synchronized(eventStore) {
+            return eventStore
+                .filter { it.traceId == traceId }
+                .takeLast(maxEvents)
+                .map { it.event }
+        }
+    }
+
+    /**
+     * Internal execution (no interceptor chain).
+     */
+    private suspend fun executeInternal(
+        request: AgentRequest,
+        traceId: String
+    ): AgentResponse {
+        return executeWithEvents(request, traceId) { event ->
+            storeEvent(traceId, event)
+        }
+    }
+
+    /**
+     * Core execution logic with event callback.
+     * All execute/stream paths converge here.
+     */
+    private suspend fun executeWithEvents(
+        request: AgentRequest,
+        traceId: String,
+        onEvent: (RuntimeEvent) -> Unit
+    ): AgentResponse {
+        val startTime = System.currentTimeMillis()
+
+        // Emit start (onEvent handles both store + flow emission)
+        onEvent(RuntimeEvent.RunStart(traceId))
+
+        // Inject request data into memory
+        heart.setState("input", request.input)
+        request.context.forEach { (k, v) -> heart.setState("ctx:$k", v) }
+        if (request.sessionId != null) heart.setState("sessionId", request.sessionId)
+
+        // Create scope with event-emitting capability
+        val scope = KAgentRuntimeScope(heart, interceptorList.toList(), traceId, onEvent)
+
+        // Execute the configured block via RuntimeHeart
+        heart.run {
+            executionBlock(scope)
+        }
+
+        // Read output from memory
+        val output = heart.getState<String>("output") ?: ""
+        val duration = System.currentTimeMillis() - startTime
+
+        // Emit end
+        onEvent(RuntimeEvent.RunEnd(traceId))
+
+        return AgentResponse(output = output, traceId = traceId, durationMs = duration)
+    }
+
+    /**
+     * Thread-safe bounded event store.
+     */
+    private fun storeEvent(traceId: String, event: RuntimeEvent) {
+        synchronized(eventStore) {
+            eventStore.add(EventStoreEntry(traceId, event))
+            while (eventStore.size > MAX_EVENTS) {
+                eventStore.removeAt(0)
+            }
+        }
+    }
+
     /**
      * Cancel the runtime
      */
@@ -144,8 +297,8 @@ class KAgentRuntime internal constructor(
     }
 
     /**
-     * Create an AgentScope with the current interceptors.
-     * Used internally by builder and factory functions.
+     * Create a scope with current interceptors.
+     * Used internally by builder and factory functions (v0.4 compat).
      */
     internal fun createScope(): KAgentRuntimeScope {
         return KAgentRuntimeScope(heart, interceptorList.toList())
@@ -191,7 +344,7 @@ class KAgentRuntimeBuilder {
             maxConcurrency = maxConcurrency
         )
 
-        val runtime = KAgentRuntime(id, heart, interceptors.toMutableList())
+        val runtime = KAgentRuntime(id, heart, interceptors.toMutableList(), runBlock)
 
         if (runBlock != {}) {
             runBlocking {
@@ -208,16 +361,22 @@ class KAgentRuntimeBuilder {
 }
 
 /**
- * Execution scope provided in run {} blocks
+ * Execution scope provided in run {} blocks and during execute().
  */
 class KAgentRuntimeScope internal constructor(
     private val heart: RuntimeHeart,
-    private val interceptors: List<StepInterceptor> = emptyList()
+    private val interceptors: List<StepInterceptor> = emptyList(),
+    internal val currentTraceId: String? = null,
+    private val onEvent: (RuntimeEvent) -> Unit = {}
 ) {
     var currentStepId: String? = null
 
     suspend fun setState(key: String, value: Any?) {
+        val oldValue = heart.getState<Any?>(key)
         heart.setState(key, value)
+        if (oldValue != value) {
+            onEvent(RuntimeEvent.MemoryChange(key, oldValue, value))
+        }
     }
 
     suspend fun <T> getState(key: String): T? {
@@ -229,36 +388,40 @@ class KAgentRuntimeScope internal constructor(
     }
 
     suspend fun step(id: String, priority: Int = 0, block: suspend KAgentRuntimeScope.() -> Unit) {
+        onEvent(RuntimeEvent.StepStart(id))
         val outerScope = this
 
-        if (interceptors.isEmpty()) {
-            // Fast path: no interceptors, execute directly
-            heart.step(id, priority) {
-                currentStepId = id
-                block(outerScope)
-            }
-            return
-        }
-
-        // Interceptor chain: wrap heart.step() execution
-        val chain = StepChain(
-            interceptors = interceptors,
-            index = 0,
-            input = StepInput(id = id, priority = priority),
-            execute = { input ->
-                val startTime = System.currentTimeMillis()
-                try {
-                    heart.step(input.id, input.priority) {
-                        currentStepId = input.id
-                        block(outerScope)
-                    }
-                    StepResult(input.id, System.currentTimeMillis() - startTime)
-                } catch (e: Exception) {
-                    StepResult(input.id, System.currentTimeMillis() - startTime, e.message)
+        try {
+            if (interceptors.isEmpty()) {
+                // Fast path: no interceptors, execute directly
+                heart.step(id, priority) {
+                    currentStepId = id
+                    block(outerScope)
                 }
+            } else {
+                // Interceptor chain: wrap heart.step() execution
+                val chain = StepChain(
+                    interceptors = interceptors,
+                    index = 0,
+                    input = StepInput(id = id, priority = priority),
+                    execute = { input ->
+                        val startTime = System.currentTimeMillis()
+                        try {
+                            heart.step(input.id, input.priority) {
+                                currentStepId = input.id
+                                block(outerScope)
+                            }
+                            StepResult(input.id, System.currentTimeMillis() - startTime)
+                        } catch (e: Exception) {
+                            StepResult(input.id, System.currentTimeMillis() - startTime, e.message)
+                        }
+                    }
+                )
+                chain.proceed(StepInput(id = id, priority = priority))
             }
-        )
-        chain.proceed(StepInput(id = id, priority = priority))
+        } finally {
+            onEvent(RuntimeEvent.StepEnd(id))
+        }
     }
 
     suspend fun registerDerived(id: String, dependencies: Set<String>, compute: suspend () -> Any?) {
@@ -266,6 +429,7 @@ class KAgentRuntimeScope internal constructor(
     }
 
     suspend fun derivedSuspend(id: String, compute: suspend () -> Any?): Any? {
+        onEvent(RuntimeEvent.DerivedRecompute(id))
         return heart.derivedSuspend(id, compute)
     }
 
@@ -297,7 +461,7 @@ fun kAgentRuntime(
         maxConcurrency = maxConcurrency
     )
 
-    val runtime = KAgentRuntime(id, heart)
+    val runtime = KAgentRuntime(id, heart, mutableListOf(), block)
 
     if (block != {}) {
         runBlocking {
@@ -321,6 +485,10 @@ fun kAgentRuntimeBuilder(block: KAgentRuntimeBuilder.() -> Unit): KAgentRuntime 
     return builder.build()
 }
 
+// ================================================================
+// v0.4 Type Definitions (kept for backward compatibility)
+// ================================================================
+
 /**
  * Runtime state enumeration
  */
@@ -341,7 +509,7 @@ sealed class RuntimeState {
 }
 
 /**
- * Agent event types
+ * Agent event types (v0.4, will be deprecated in favor of [RuntimeEvent])
  */
 sealed class AgentEvent {
     data class TaskScheduled(val taskId: String) : AgentEvent()

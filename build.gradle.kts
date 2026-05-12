@@ -4,7 +4,7 @@ plugins {
 }
 
 group = "com.cogent"
-version = "0.5.0-SNAPSHOT"
+version = "0.5.1"
 description = "Cogent: JVM-Native Agent Execution Protocol & Runtime"
 
 repositories {

@@ -256,7 +256,8 @@ Computed states that automatically recompute when dependencies change.
 | v0.2 | Reactive Layer | Dependency Graph, Derived State, Recomposition Scope, Execution Trace, Replay Engine |
 | v0.3 | Fiber Runtime | AgentScheduler, RuntimeHeart, Suspendable Derived, Auto Dependency Tracking, Fiber Tasks |
 | v0.4 | API Convergence | KAgentRuntime unified facade, hidden internals, clean public API |
-| v0.5 | Rebrand to Cogent | Package namespace `com.cogent`, project renamed, execution protocol layer |
+| v0.5 | Rebrand to Cogent | Package namespace `com.cogent`, project renamed |
+| v0.5.1 | Execution Protocol | AgentRequest/Response, execute/stream dual API, RuntimeInterceptor, traceId, RuntimeEvent, 16 protocol tests |
 
 ## Building
 

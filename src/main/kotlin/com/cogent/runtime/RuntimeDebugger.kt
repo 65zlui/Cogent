@@ -13,16 +13,18 @@ import com.cogent.memory.core.Memory
  * and state inspection. Separated from [KAgentRuntime] to keep execution
  * and observability concerns decoupled.
  *
- * ### Planned capabilities (v0.6.x):
- * - [timeline] — reconstruct a causal timeline from stored events
+ * ### v0.6.1 capabilities:
+ * - [timeline] — reconstruct a causal DAG ([TimelineGraph]) from stored events
  * - [inspectState] — return state snapshot by version (deferred to v0.6.1)
  * - [queryEvents] — filter events by trace, type, time range
  *
  * Usage:
  * ```kotlin
  * val dbg = runtime.debugger()
- * val tl = dbg.timeline("trace_123")
- * tl?.nodes?.forEach { node -> println("${node.event} @ v${node.stateVersion}") }
+ * val graph = dbg.timeline("trace_123")
+ * graph?.edges?.forEach { edge ->
+ *     println("${edge.type}: ${edge.fromNodeId} → ${edge.toNodeId}")
+ * }
  * ```
  */
 class RuntimeDebugger(
@@ -37,15 +39,16 @@ class RuntimeDebugger(
     // ================================================================
 
     /**
-     * Reconstruct the execution timeline for a given [traceId].
+     * Reconstruct the execution timeline DAG for a given [traceId].
      *
-     * Returns a chronologically ordered [Timeline] with causally-linked nodes,
+     * Returns a [TimelineGraph] with causality edges linking
+     * StepStart↔StepEnd, ToolCall↔ToolResult, and sequential ordering,
      * or null if no events exist for this traceId.
      *
      * @param traceId The execution trace to reconstruct.
-     * @return [Timeline] or null.
+     * @return [TimelineGraph] or null.
      */
-    fun timeline(traceId: String): Timeline? {
+    fun timeline(traceId: String): TimelineGraph? {
         val events = eventStore.getEvents(traceId)
         return timelineBuilder.build(events)
     }

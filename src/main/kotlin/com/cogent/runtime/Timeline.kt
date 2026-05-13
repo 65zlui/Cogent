@@ -48,23 +48,79 @@ data class Timeline(
     val nodeCount: Int
 )
 
+// ============================================================
+// v0.6.1 — Timeline DAG
+// ============================================================
+
 /**
- * Builds [Timeline] instances from raw [EventStoreEntry] records.
+ * Types of causal/structural edges in the timeline DAG.
  *
- * Converts the flat event log into a causally-linked node sequence.
- * For v0.6.0, the timeline is a simple linear chain where each node
- * points to its chronological predecessor via [TimelineNode.parentId].
+ * | Type | Source → Target | Semantics |
+ * |------|----------------|-----------|
+ * | SEQUENTIAL | node[N] → node[N+1] | Chronological event ordering |
+ * | CAUSAL | StepStart → StepEnd | Execution scope boundary |
+ * | TOOL_FLOW | ToolCall → ToolResult | Tool invocation lifecycle |
+ */
+enum class EdgeType {
+    SEQUENTIAL,
+    CAUSAL,
+    TOOL_FLOW
+}
+
+/**
+ * A directed edge in the timeline causality graph.
  *
- * Future versions (v0.6.1+) may construct DAG-based causality graphs
- * by linking StepStart↔StepEnd, ToolCall↔ToolResult, etc.
+ * @param fromNodeId Source node ID.
+ * @param toNodeId Target node ID.
+ * @param type The nature of the relationship.
+ */
+data class TimelineEdge(
+    val fromNodeId: String,
+    val toNodeId: String,
+    val type: EdgeType
+)
+
+/**
+ * A DAG-based execution timeline with explicit causality edges.
+ *
+ * Unlike [Timeline] which is a flat ordered list,
+ * [TimelineGraph] captures multiple relationship dimensions:
+ *
+ * - **SEQUENTIAL** edges form the chronological backbone
+ * - **CAUSAL** edges link scope boundaries (StepStart↔StepEnd)
+ * - **TOOL_FLOW** edges link tool invocations (ToolCall↔ToolResult)
+ *
+ * @param traceId The execution trace this graph covers.
+ * @param nodes All timeline nodes (chronologically ordered).
+ * @param edges Causality and ordering edges forming the DAG.
+ * @param startTime Timestamp of the first node.
+ * @param endTime Timestamp of the last node.
+ * @param nodeCount Total number of nodes.
+ */
+data class TimelineGraph(
+    val traceId: String,
+    val nodes: List<TimelineNode>,
+    val edges: List<TimelineEdge>,
+    val startTime: Long,
+    val endTime: Long,
+    val nodeCount: Int
+)
+
+/**
+ * Builds [TimelineGraph] instances from raw [EventStoreEntry] records.
+ *
+ * Converts the flat event log into a DAG with three edge types:
+ * - SEQUENTIAL edges for chronological ordering
+ * - CAUSAL edges linking StepStart↔StepEnd, RunStart↔RunEnd
+ * - TOOL_FLOW edges linking ToolCall↔ToolResult
  */
 internal class TimelineBuilder {
 
     /**
-     * Build a [Timeline] from a chronologically-ordered event list.
+     * Build a [TimelineGraph] from a chronologically-ordered event list.
      * Returns null if [events] is empty.
      */
-    fun build(events: List<EventStoreEntry>): Timeline? {
+    fun build(events: List<EventStoreEntry>): TimelineGraph? {
         if (events.isEmpty()) return null
 
         val traceId = events.first().traceId
@@ -79,9 +135,12 @@ internal class TimelineBuilder {
             )
         }
 
-        return Timeline(
+        val edges = buildEdges(nodes)
+
+        return TimelineGraph(
             traceId = traceId,
             nodes = nodes,
+            edges = edges,
             startTime = events.first().timestamp,
             endTime = events.last().timestamp,
             nodeCount = events.size
@@ -89,12 +148,76 @@ internal class TimelineBuilder {
     }
 
     /**
-     * Filter a timeline to only include events matching the given [types].
+     * Construct DAG edges from an ordered node list.
+     *
+     * Produces three edge types:
+     * 1. [EdgeType.SEQUENTIAL] — between every consecutive node pair
+     * 2. [EdgeType.CAUSAL] — pairing StepStart↔StepEnd and RunStart↔RunEnd via stack
+     * 3. [EdgeType.TOOL_FLOW] — pairing ToolCall↔ToolResult via stack
      */
-    fun filterByType(timeline: Timeline, vararg types: Class<out RuntimeEvent>): Timeline {
-        val filtered = timeline.nodes.filter { node ->
-            types.any { it.isInstance(node.event) }
+    private fun buildEdges(nodes: List<TimelineNode>): List<TimelineEdge> {
+        val edges = mutableListOf<TimelineEdge>()
+        val stepStack = ArrayDeque<String>()   // pending StepStart node IDs
+        val toolStack = ArrayDeque<String>()   // pending ToolCall node IDs
+        var runStartNodeId: String? = null
+
+        for ((index, node) in nodes.withIndex()) {
+            // 1. SEQUENTIAL: chronological backbone
+            if (index > 0) {
+                edges.add(TimelineEdge(
+                    fromNodeId = nodes[index - 1].id,
+                    toNodeId = node.id,
+                    type = EdgeType.SEQUENTIAL
+                ))
+            }
+
+            // 2. Scope/causality pairing and tool flow
+            when (node.event) {
+                is RuntimeEvent.RunStart -> runStartNodeId = node.id
+                is RuntimeEvent.RunEnd -> {
+                    val startId = runStartNodeId
+                    if (startId != null) {
+                        edges.add(TimelineEdge(startId, node.id, EdgeType.CAUSAL))
+                    }
+                }
+                is RuntimeEvent.StepStart -> stepStack.addLast(node.id)
+                is RuntimeEvent.StepEnd -> {
+                    if (stepStack.isNotEmpty()) {
+                        edges.add(TimelineEdge(stepStack.removeLast(), node.id, EdgeType.CAUSAL))
+                    }
+                }
+                is RuntimeEvent.ToolCall -> toolStack.addLast(node.id)
+                is RuntimeEvent.ToolResult -> {
+                    if (toolStack.isNotEmpty()) {
+                        edges.add(TimelineEdge(toolStack.removeLast(), node.id, EdgeType.TOOL_FLOW))
+                    }
+                }
+                else -> { /* MemoryChange, DerivedRecompute — no scope edges */ }
+            }
         }
-        return timeline.copy(nodes = filtered, nodeCount = filtered.size)
+
+        return edges
+    }
+
+    /**
+     * Filter a timeline graph to only include events matching the given [types].
+     * Edges whose both endpoints survive the filter are preserved.
+     */
+    fun filterByType(graph: TimelineGraph, vararg types: Class<out RuntimeEvent>): TimelineGraph {
+        val filteredNodeIds = graph.nodes
+            .filter { node -> types.any { it.isInstance(node.event) } }
+            .map { it.id }
+            .toSet()
+
+        val filteredNodes = graph.nodes.filter { it.id in filteredNodeIds }
+        val filteredEdges = graph.edges.filter {
+            it.fromNodeId in filteredNodeIds && it.toNodeId in filteredNodeIds
+        }
+
+        return graph.copy(
+            nodes = filteredNodes,
+            edges = filteredEdges,
+            nodeCount = filteredNodes.size
+        )
     }
 }

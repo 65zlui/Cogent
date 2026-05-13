@@ -326,7 +326,8 @@ The following modules are `internal` and should not be used directly:
 | v0.3 | Fiber Runtime | AgentScheduler, RuntimeHeart, Suspendable Derived, Auto Dependency Tracking |
 | v0.4 | API Convergence | KAgentRuntime unified facade, hidden internals, clean public API |
 | v0.5 | Rebrand & Protocol | Package `com.cogent`, AgentRequest/Response, execute/stream/trace, RuntimeInterceptor, RuntimeEvent |
-| v0.6 | Observability Plane | RuntimeDebugger, Timeline DAG (TimelineGraph, EdgeType), stateVersion, causal linking |
+| v0.6 | Observability Plane | RuntimeDebugger, EventStore, stateVersion, EventFilter, queryEvents, trace() API |
+| v0.6.1 | Timeline DAG | TimelineGraph, TimelineEdge, EdgeType (SEQUENTIAL/CAUSAL/TOOL_FLOW), causal linking, nested step pairing, filterByType |
 
 ## Building
 

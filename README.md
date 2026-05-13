@@ -2,7 +2,7 @@
 
 > JVM-Native Agent Execution Protocol & Runtime — Execution Observability Infrastructure
 
-Cogent is a Kotlin agent runtime that brings UI-runtime abstractions — Snapshot, Derived State, Dependency Tracking, Fiber Scheduling — to the Agent state management domain. v0.6+ focuses on **execution observability infrastructure**: making agent execution observable, navigable, and analyzable through a DAG-based timeline model.
+Cogent is a Kotlin agent runtime that brings UI-runtime abstractions — Snapshot, Derived State, Dependency Tracking, Fiber Scheduling — to the Agent state management domain. v0.6+ focuses on **execution observability infrastructure**: making agent execution observable, navigable, and analyzable through a DAG-based timeline model with graph-native query capabilities.
 
 ## Quick Start
 
@@ -48,6 +48,22 @@ val graph = dbg.timeline(response.traceId)
 graph?.edges?.forEach { edge ->
     println("${edge.type}: ${edge.fromNodeId} → ${edge.toNodeId}")
 }
+
+// v0.6.2 Queryable Execution Graph — navigate the DAG
+val engine = dbg.query(response.traceId)
+engine?.let { q ->
+    val criticalPath = q.criticalPath()
+    println("Critical path: ${criticalPath.size} nodes")
+
+    val steps = q.byStep("process")
+    println("Process step nodes: ${steps.size}")
+
+    val firstNode = graph?.nodes?.firstOrNull()
+    if (firstNode != null) {
+        val descendants = q.descendants(firstNode.id)
+        println("Descendants of root: ${descendants.size}")
+    }
+}
 ```
 
 ## Architecture Overview
@@ -61,15 +77,17 @@ graph?.edges?.forEach { edge ->
 │  ┌────────────────────┐         ┌──────────────────────┐ │
 │  │ execute()          │         │ RuntimeDebugger       │ │
 │  │ stream() ──────────┼─events─→│  ├─ timeline(traceId) │ │
-│  │ trace()            │         │  ├─ queryEvents()     │ │
-│  └────────┬───────────┘         │  └─ inspectState(v)   │ │
-│           │                     └──────────┬───────────┘ │
-│           ▼                                 ▼             │
-│  ┌──────────────────────────────────────────────────┐    │
-│  │              EventStore + TimelineBuilder         │    │
-│  │  RuntimeEvent → EventStoreEntry → TimelineGraph  │    │
-│  │  (stateVersion, edges: SEQUENTIAL/CAUSAL/TOOL)   │    │
-│  └──────────────────────────────────────────────────┘    │
+│  │ trace()            │         │  ├─ query(traceId)    │ │
+│  └────────┬───────────┘         │  ├─ inspect(nodeId)   │ │
+│           │                     │  ├─ queryEvents()     │ │
+│           ▼                     │  └─ inspectState(v)   │ │
+│  ┌──────────────────────────────┴───────────────┐       │
+│  │          Observability Pipeline              │       │
+│  │  EventStore → TimelineProjection             │       │
+│  │    → TimelineGraph (indices)                 │       │
+│  │    → TimelineQueryEngine → Debugger          │       │
+│  │  Edges: SEQUENTIAL / CAUSAL / TOOL_FLOW      │       │
+│  └──────────────────────────────────────────────┘       │
 │                                                          │
 │  Internal Subsystems:                                    │
 │  ┌──────────────┐  ┌────────────────┐  ┌──────────────┐ │
@@ -97,15 +115,29 @@ RuntimeEvent (8 subtypes)
 EventStore.record() → assigns stateVersion (monotonic)
     │
     ▼
-TimelineBuilder.build() → TimelineGraph
+TimelineProjection.project() → TimelineGraph + TimelineIndices
     │  ├── nodes: List<TimelineNode>
-    │  └── edges: List<TimelineEdge>
-    │       ├── SEQUENTIAL (chronological ordering)
-    │       ├── CAUSAL    (StepStart↔StepEnd, RunStart↔RunEnd)
-    │       └── TOOL_FLOW (ToolCall↔ToolResult)
+    │  ├── edges: List<TimelineEdge>
+    │  │    ├── SEQUENTIAL (chronological ordering)
+    │  │    ├── CAUSAL    (StepStart↔StepEnd, RunStart↔RunEnd)
+    │  │    └── TOOL_FLOW (ToolCall↔ToolResult)
+    │  └── indices: TimelineIndices (immutable, pre-built)
+    │       ├── byNodeId         lookup by node ID
+    │       ├── byStepId         index by step name
+    │       ├── byTool           index by tool name
+    │       ├── adjacency        forward edge map
+    │       └── reverseAdjacency reverse edge map
     │
     ▼
-RuntimeDebugger → query + inspect + navigate
+TimelineQueryEngine → graph-native queries
+    │  ├── byStep / byTool / byTimeRange
+    │  ├── children / parents
+    │  ├── descendants / ancestors
+    │  ├── criticalPath (longest duration)
+    │  └── filterByType (subgraph extraction)
+    │
+    ▼
+RuntimeDebugger → unified API for query + inspect + navigate
 ```
 
 ## API Reference
@@ -183,7 +215,11 @@ Execution observability & analysis tool, independent from the runtime execution 
 
 | Method | Return Type | Description |
 |--------|-------------|-------------|
-| `timeline(traceId)` | `TimelineGraph?` | Reconstruct execution DAG for a trace |
+| `timeline(traceId)` | `TimelineGraph?` | Reconstruct execution DAG with indices for a trace |
+| `query(traceId)` | `TimelineQueryEngine?` | Access graph-native query engine for a trace (v0.6.2+) |
+| `inspect(nodeId)` | `TimelineNode?` | Look up a node by ID across all cached traces (v0.6.2+) |
+| `children(nodeId)` | `List<TimelineNode>` | Direct children of a node (forward adjacency, v0.6.2+) |
+| `parents(nodeId)` | `List<TimelineNode>` | Direct parents of a node (reverse adjacency, v0.6.2+) |
 | `inspectState(version)` | `Map<String, Any?>?` | State snapshot by version (v0.6.1+) |
 | `queryEvents(filter)` | `List<RuntimeEvent>` | Filter events by trace/type/time |
 | `traceIds()` | `List<String>` | All trace IDs in the event store |
@@ -198,7 +234,8 @@ data class TimelineGraph(
     val edges: List<TimelineEdge>,
     val startTime: Long,
     val endTime: Long,
-    val nodeCount: Int
+    val nodeCount: Int,
+    val indices: TimelineIndices  // pre-built query indices (v0.6.2+)
 )
 
 data class TimelineNode(
@@ -216,6 +253,62 @@ data class TimelineEdge(
     val fromNodeId: String,
     val toNodeId: String,
     val type: EdgeType
+)
+```
+
+### TimelineIndices (v0.6.2 — Immutable Query Indices)
+
+Pre-computed indices built once during projection. Immutable after construction — all queries use these for O(1) or O(log n) access.
+
+```kotlin
+data class TimelineIndices(
+    val byNodeId: Map<String, TimelineNode>,           // node ID → node
+    val byStepId: Map<String, List<String>>,           // step name → node IDs
+    val byTool: Map<String, List<String>>,             // tool name → node IDs
+    val adjacency: Map<String, List<String>>,          // node ID → child IDs
+    val reverseAdjacency: Map<String, List<String>>    // node ID → parent IDs
+) {
+    companion object {
+        fun build(nodes: List<TimelineNode>, edges: List<TimelineEdge>): TimelineIndices
+    }
+}
+```
+
+### TimelineProjection (v0.6.2 — Production Entry Point)
+
+Converts raw EventStore records into a fully-indexed, queryable TimelineGraph. The production entry point for timeline construction — delegates to TimelineBuilder for DAG construction, then builds indices.
+
+```kotlin
+class TimelineProjection {
+    fun project(events: List<EventStoreEntry>): TimelineGraph?
+}
+```
+
+### TimelineQueryEngine (v0.6.2 — Graph-Native Queries)
+
+Query engine for navigating and analyzing an execution DAG. All queries use pre-built indices — no full-graph scans.
+
+| Method | Return Type | Description |
+|--------|-------------|-------------|
+| `byStep(stepId)` | `List<TimelineNode>` | Find all nodes for a step (StepStart + StepEnd) |
+| `byTool(tool)` | `List<TimelineNode>` | Find all nodes for a tool (ToolCall + ToolResult) |
+| `byTimeRange(start, end)` | `List<TimelineNode>` | Find nodes within a time range |
+| `children(nodeId)` | `List<TimelineNode>` | Direct children (forward adjacency) |
+| `parents(nodeId)` | `List<TimelineNode>` | Direct parents (reverse adjacency) |
+| `descendants(nodeId)` | `List<TimelineNode>` | All descendants (recursive DFS) |
+| `ancestors(nodeId)` | `List<TimelineNode>` | All ancestors (recursive DFS) |
+| `criticalPath()` | `List<TimelineNode>` | Longest duration path via topological sort + DP |
+| `filterByType(vararg types)` | `TimelineGraph` | Subgraph extraction by event type |
+
+### ExecutionSpan (v0.6.2 — Placeholder)
+
+Reserved for the v0.6.3+ tracing model (OpenTelemetry-style spans). Currently a placeholder data class.
+
+```kotlin
+data class ExecutionSpan(
+    val startNode: String,
+    val endNode: String,
+    val durationMs: Long
 )
 ```
 
@@ -315,7 +408,9 @@ The following modules are `internal` and should not be used directly:
 | `InvalidationGraph` | Dependency relationship management and invalidation propagation |
 | `DerivedState` | Computed states that auto-recompute on dependency changes |
 | `EventStore` | Bounded, thread-safe event log with monotonic stateVersion |
-| `TimelineBuilder` | Reconstructs TimelineGraph from raw EventStore records |
+| `TimelineBuilder` | Internal DAG constructor — builds TimelineGraph edges from flat events |
+| `TimelineProjection` | Production entry point — TimelineBuilder + TimelineIndices.build() (v0.6.2+) |
+| `TimelineQueryEngine` | Graph-native query interface — byStep/byTool/criticalPath/descendants (v0.6.2+) |
 
 ## Version History
 
@@ -328,6 +423,7 @@ The following modules are `internal` and should not be used directly:
 | v0.5 | Rebrand & Protocol | Package `com.cogent`, AgentRequest/Response, execute/stream/trace, RuntimeInterceptor, RuntimeEvent |
 | v0.6 | Observability Plane | RuntimeDebugger, EventStore, stateVersion, EventFilter, queryEvents, trace() API |
 | v0.6.1 | Timeline DAG | TimelineGraph, TimelineEdge, EdgeType (SEQUENTIAL/CAUSAL/TOOL_FLOW), causal linking, nested step pairing, filterByType |
+| v0.6.2 | Queryable Execution Graph | TimelineProjection, TimelineIndices (immutable), TimelineQueryEngine (byStep/byTool/byTimeRange/descendants/ancestors/children/parents/criticalPath/filterByType), ExecutionSpan placeholder, expanded RuntimeDebugger API (query/inspect/children/parents) |
 
 ## Building
 

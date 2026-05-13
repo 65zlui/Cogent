@@ -96,6 +96,7 @@ data class TimelineEdge(
  * @param startTime Timestamp of the first node.
  * @param endTime Timestamp of the last node.
  * @param nodeCount Total number of nodes.
+ * @param indices Pre-computed query indices for fast graph traversal.
  */
 data class TimelineGraph(
     val traceId: String,
@@ -103,8 +104,122 @@ data class TimelineGraph(
     val edges: List<TimelineEdge>,
     val startTime: Long,
     val endTime: Long,
-    val nodeCount: Int
+    val nodeCount: Int,
+    val indices: TimelineIndices = TimelineIndices.EMPTY
 )
+
+// ============================================================
+// v0.6.2 — Queryable Execution Graph
+// ============================================================
+
+/**
+ * Pre-computed indices for fast graph traversal and query.
+ *
+ * Built once during [TimelineProjection.project] — immutable after construction.
+ *
+ * @param byNodeId All nodes keyed by their [TimelineNode.id].
+ * @param byStepId StepStart node IDs grouped by step name.
+ * @param byTool ToolCall node IDs grouped by tool name.
+ * @param adjacency Forward edge map: nodeId → list of child node IDs.
+ * @param reverseAdjacency Reverse edge map: nodeId → list of parent node IDs.
+ */
+data class TimelineIndices(
+    val byNodeId: Map<String, TimelineNode>,
+    val byStepId: Map<String, List<String>>,
+    val byTool: Map<String, List<String>>,
+    val adjacency: Map<String, List<String>>,
+    val reverseAdjacency: Map<String, List<String>>
+) {
+    companion object {
+        val EMPTY = TimelineIndices(
+            byNodeId = emptyMap(),
+            byStepId = emptyMap(),
+            byTool = emptyMap(),
+            adjacency = emptyMap(),
+            reverseAdjacency = emptyMap()
+        )
+
+        /**
+         * Build indices from an already-constructed node and edge list.
+         */
+        fun build(nodes: List<TimelineNode>, edges: List<TimelineEdge>): TimelineIndices {
+            val byNodeId = nodes.associateBy { it.id }
+
+            val byStepId = mutableMapOf<String, MutableList<String>>()
+            val byTool = mutableMapOf<String, MutableList<String>>()
+            val adjacency = mutableMapOf<String, MutableSet<String>>()
+            val reverseAdjacency = mutableMapOf<String, MutableSet<String>>()
+
+            for (node in nodes) {
+                when (val event = node.event) {
+                    is RuntimeEvent.StepStart ->
+                        byStepId.getOrPut(event.stepId) { mutableListOf() }.add(node.id)
+                    is RuntimeEvent.StepEnd ->
+                        byStepId.getOrPut(event.stepId) { mutableListOf() }.add(node.id)
+                    is RuntimeEvent.ToolCall ->
+                        byTool.getOrPut(event.tool) { mutableListOf() }.add(node.id)
+                    is RuntimeEvent.ToolResult ->
+                        byTool.getOrPut(event.tool) { mutableListOf() }.add(node.id)
+                    else -> {}
+                }
+            }
+
+            for (edge in edges) {
+                adjacency.getOrPut(edge.fromNodeId) { mutableSetOf() }.add(edge.toNodeId)
+                reverseAdjacency.getOrPut(edge.toNodeId) { mutableSetOf() }.add(edge.fromNodeId)
+            }
+
+            return TimelineIndices(
+                byNodeId = byNodeId,
+                byStepId = byStepId.mapValues { it.value.toList() },
+                byTool = byTool.mapValues { it.value.toList() },
+                adjacency = adjacency.mapValues { it.value.toList() },
+                reverseAdjacency = reverseAdjacency.mapValues { it.value.toList() }
+            )
+        }
+    }
+}
+
+/**
+ * A time-bounded execution span.
+ *
+ * Reserved for v0.6.3+ tracing model (OpenTelemetry-style).
+ * In v0.6.2 this is a placeholder — spans are not fully implemented.
+ *
+ * @param startNode The node that opens this span.
+ * @param endNode The node that closes this span.
+ * @param durationMs Wall-clock duration in milliseconds.
+ */
+data class ExecutionSpan(
+    val startNode: String,
+    val endNode: String,
+    val durationMs: Long
+)
+
+/**
+ * Projection layer that converts raw EventStore records into
+ * a fully-indexed, queryable [TimelineGraph].
+ *
+ * This is the production entry point for graph construction.
+ * Unlike [TimelineBuilder] which produces a bare graph,
+ * [TimelineProjection] attaches query indices and timing metadata.
+ */
+class TimelineProjection {
+
+    private val builder = TimelineBuilder()
+
+    /**
+     * Project stored events into a [TimelineGraph] with query indices.
+     *
+     * @param events Chronologically ordered events from [EventStore].
+     * @return Fully indexed [TimelineGraph], or null if [events] is empty.
+     */
+    fun project(events: List<EventStoreEntry>): TimelineGraph? {
+        val graph = builder.build(events) ?: return null
+        val indices = TimelineIndices.build(graph.nodes, graph.edges)
+        return graph.copy(indices = indices)
+    }
+}
 
 /**
  * Builds [TimelineGraph] instances from raw [EventStoreEntry] records.

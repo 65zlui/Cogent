@@ -478,4 +478,263 @@ class TimelineDebuggerTest {
         assertEquals(graph.nodeCount - 1, sequentialEdges.size,
             "SEQUENTIAL edges should link all nodes in order")
     }
+
+    // ================================================================
+    // TimelineProjection
+    // ================================================================
+
+    @Test
+    fun `projection builds indices with byStepId`() {
+        val store = EventStore()
+        store.record("proj", RuntimeEvent.RunStart("proj"))
+        store.record("proj", RuntimeEvent.StepStart("compute"))
+        store.record("proj", RuntimeEvent.StepEnd("compute"))
+        store.record("proj", RuntimeEvent.StepStart("validate"))
+        store.record("proj", RuntimeEvent.StepEnd("validate"))
+        store.record("proj", RuntimeEvent.RunEnd("proj"))
+
+        val projection = TimelineProjection()
+        val graph = projection.project(store.getEvents("proj"))
+
+        assertNotNull(graph)
+        val engine = TimelineQueryEngine(graph)
+
+        // byStep finds StepStart and StepEnd nodes
+        val computeNodes = engine.byStep("compute")
+        assertEquals(2, computeNodes.size)
+        assertTrue(computeNodes.any { it.event is RuntimeEvent.StepStart })
+        assertTrue(computeNodes.any { it.event is RuntimeEvent.StepEnd })
+
+        val validateNodes = engine.byStep("validate")
+        assertEquals(2, validateNodes.size)
+    }
+
+    @Test
+    fun `projection builds indices with byTool`() {
+        val store = EventStore()
+        store.record("proj", RuntimeEvent.RunStart("proj"))
+        store.record("proj", RuntimeEvent.ToolCall("search", "q1"))
+        store.record("proj", RuntimeEvent.ToolResult("search", "r1"))
+        store.record("proj", RuntimeEvent.ToolCall("compute", "42"))
+        store.record("proj", RuntimeEvent.ToolResult("compute", "84"))
+        store.record("proj", RuntimeEvent.RunEnd("proj"))
+
+        val projection = TimelineProjection()
+        val graph = projection.project(store.getEvents("proj"))
+
+        assertNotNull(graph)
+        val engine = TimelineQueryEngine(graph)
+
+        val searchNodes = engine.byTool("search")
+        assertEquals(2, searchNodes.size)
+
+        val computeNodes = engine.byTool("compute")
+        assertEquals(2, computeNodes.size)
+    }
+
+    @Test
+    fun `projection builds adjacency indices`() {
+        val store = EventStore()
+        store.record("proj", RuntimeEvent.RunStart("proj"))
+        store.record("proj", RuntimeEvent.StepStart("s1"))
+        store.record("proj", RuntimeEvent.StepEnd("s1"))
+        store.record("proj", RuntimeEvent.RunEnd("proj"))
+
+        val projection = TimelineProjection()
+        val graph = projection.project(store.getEvents("proj"))
+
+        assertNotNull(graph)
+        val engine = TimelineQueryEngine(graph)
+
+        // node_0 (RunStart) should have node_1 (StepStart) as child (SEQUENTIAL)
+        val rootChildren = engine.children(graph.nodes[0].id)
+        assertTrue(rootChildren.isNotEmpty())
+        assertEquals(graph.nodes[1].id, rootChildren[0].id)
+
+        // node_2 (StepEnd) should have node_3 (RunEnd) as child (SEQUENTIAL)
+        val lastNodeParents = engine.parents(graph.nodes[3].id)
+        assertTrue(lastNodeParents.isNotEmpty())
+        assertEquals(graph.nodes[2].id, lastNodeParents[0].id)
+    }
+
+    // ================================================================
+    // TimelineQueryEngine
+    // ================================================================
+
+    @Test
+    fun `query engine byTimeRange returns filtered nodes`() {
+        val store = EventStore()
+        val now = System.currentTimeMillis()
+
+        store.record("tr", RuntimeEvent.RunStart("tr"))
+        Thread.sleep(2)
+        store.record("tr", RuntimeEvent.StepStart("s1"))
+        Thread.sleep(2)
+        store.record("tr", RuntimeEvent.StepEnd("s1"))
+        store.record("tr", RuntimeEvent.RunEnd("tr"))
+
+        val projection = TimelineProjection()
+        val graph = projection.project(store.getEvents("tr"))!!
+        val engine = TimelineQueryEngine(graph)
+
+        // Narrow range — only first node
+        val narrow = engine.byTimeRange(now - 1, now + 1)
+        assertTrue(narrow.isNotEmpty())
+
+        // Full range — all nodes
+        val all = engine.byTimeRange(0, Long.MAX_VALUE)
+        assertEquals(graph.nodeCount, all.size)
+    }
+
+    @Test
+    fun `query engine descendants and ancestors`() {
+        val store = EventStore()
+        store.record("ga", RuntimeEvent.RunStart("ga"))
+        store.record("ga", RuntimeEvent.StepStart("outer"))
+        store.record("ga", RuntimeEvent.StepStart("inner"))
+        store.record("ga", RuntimeEvent.StepEnd("inner"))
+        store.record("ga", RuntimeEvent.StepEnd("outer"))
+        store.record("ga", RuntimeEvent.RunEnd("ga"))
+
+        val projection = TimelineProjection()
+        val graph = projection.project(store.getEvents("ga"))!!
+        val engine = TimelineQueryEngine(graph)
+
+        // Root (RunStart) should have all others as descendants
+        val rootDescendants = engine.descendants(graph.nodes[0].id)
+        assertEquals(graph.nodeCount - 1, rootDescendants.size)
+
+        // Last node (RunEnd) should have all others as ancestors
+        val lastAncestors = engine.ancestors(graph.nodes.last().id)
+        assertEquals(graph.nodeCount - 1, lastAncestors.size)
+    }
+
+    @Test
+    fun `query engine critical path returns longest execution chain`() {
+        val store = EventStore()
+        store.record("cp", RuntimeEvent.RunStart("cp"))
+        store.record("cp", RuntimeEvent.StepStart("slow"))
+        store.record("cp", RuntimeEvent.ToolCall("api", "req"))
+        store.record("cp", RuntimeEvent.ToolResult("api", "res"))
+        store.record("cp", RuntimeEvent.StepEnd("slow"))
+        store.record("cp", RuntimeEvent.RunEnd("cp"))
+
+        val projection = TimelineProjection()
+        val graph = projection.project(store.getEvents("cp"))!!
+        val engine = TimelineQueryEngine(graph)
+
+        val critical = engine.criticalPath()
+        assertTrue(critical.isNotEmpty())
+        // Critical path should start with the first node
+        assertEquals(graph.nodes[0].id, critical.first().id)
+    }
+
+    @Test
+    fun `query engine filterByType`() {
+        val store = EventStore()
+        store.record("ft", RuntimeEvent.RunStart("ft"))
+        store.record("ft", RuntimeEvent.StepStart("s1"))
+        store.record("ft", RuntimeEvent.MemoryChange("k", null, "v"))
+        store.record("ft", RuntimeEvent.StepEnd("s1"))
+        store.record("ft", RuntimeEvent.RunEnd("ft"))
+
+        val projection = TimelineProjection()
+        val graph = projection.project(store.getEvents("ft"))!!
+        val engine = TimelineQueryEngine(graph)
+
+        val filtered = engine.filterByType(
+            RuntimeEvent.RunStart::class.java,
+            RuntimeEvent.RunEnd::class.java
+        )
+
+        assertEquals(2, filtered.nodeCount)
+        assertTrue(filtered.nodes.all { it.event is RuntimeEvent.RunStart || it.event is RuntimeEvent.RunEnd })
+    }
+
+    // ================================================================
+    // RuntimeDebugger v0.6.2 API
+    // ================================================================
+
+    @Test
+    fun `debugger query returns engine for known trace`() {
+        val store = EventStore()
+        store.record("q1", RuntimeEvent.RunStart("q1"))
+        store.record("q1", RuntimeEvent.StepStart("s1"))
+        store.record("q1", RuntimeEvent.StepEnd("s1"))
+        store.record("q1", RuntimeEvent.RunEnd("q1"))
+
+        val memory = com.cogent.memory.core.Memory()
+        val dbg = RuntimeDebugger(store, memory)
+        val engine = dbg.query("q1")
+
+        assertNotNull(engine)
+        assertEquals(4, engine.byStep("s1").size + 2) // step + run events
+    }
+
+    @Test
+    fun `debugger inspect returns correct node`() {
+        val store = EventStore()
+        store.record("ins", RuntimeEvent.RunStart("ins"))
+        store.record("ins", RuntimeEvent.StepStart("s1"))
+        store.record("ins", RuntimeEvent.StepEnd("s1"))
+        store.record("ins", RuntimeEvent.RunEnd("ins"))
+
+        val memory = com.cogent.memory.core.Memory()
+        val dbg = RuntimeDebugger(store, memory)
+
+        // Trigger graph cache
+        dbg.timeline("ins")
+
+        val node = dbg.inspect("node_1_ins")
+        assertNotNull(node)
+        assertTrue(node.event is RuntimeEvent.StepStart)
+    }
+
+    @Test
+    fun `debugger children and parents`() {
+        val store = EventStore()
+        store.record("nav", RuntimeEvent.RunStart("nav"))
+        store.record("nav", RuntimeEvent.StepStart("s1"))
+        store.record("nav", RuntimeEvent.StepEnd("s1"))
+        store.record("nav", RuntimeEvent.RunEnd("nav"))
+
+        val memory = com.cogent.memory.core.Memory()
+        val dbg = RuntimeDebugger(store, memory)
+
+        // Trigger cache
+        dbg.timeline("nav")
+
+        // First node has two children (SEQUENTIAL + CAUSAL to RunEnd)
+        val firstChildren = dbg.children("node_0_nav")
+        assertEquals(2, firstChildren.size)
+        assertTrue(firstChildren.any { it.id == "node_1_nav" })
+        assertTrue(firstChildren.any { it.id == "node_3_nav" })
+
+        // Middle node has one parent and one child
+        val midParents = dbg.parents("node_1_nav")
+        assertEquals(1, midParents.size)
+        assertEquals("node_0_nav", midParents[0].id)
+
+        val midChildren = dbg.children("node_1_nav")
+        assertEquals(1, midChildren.size)
+        assertEquals("node_2_nav", midChildren[0].id)
+
+        // Last node (RunEnd) has two parents: SEQUENTIAL + CAUSAL
+        val lastParents = dbg.parents("node_3_nav")
+        assertEquals(2, lastParents.size)
+        assertTrue(lastParents.any { it.id == "node_2_nav" })
+        assertTrue(lastParents.any { it.id == "node_0_nav" })
+    }
+
+    @Test
+    fun `debugger query returns null for unknown trace`() {
+        val store = EventStore()
+        val memory = com.cogent.memory.core.Memory()
+        val dbg = RuntimeDebugger(store, memory)
+
+        assertNull(dbg.query("unknown"))
+        assertNull(dbg.inspect("node_0_unknown"))
+        assertTrue(dbg.children("node_0_unknown").isEmpty())
+        assertTrue(dbg.parents("node_0_unknown").isEmpty())
+    }
 }

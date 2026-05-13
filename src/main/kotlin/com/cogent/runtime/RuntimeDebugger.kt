@@ -13,18 +13,28 @@ import com.cogent.memory.core.Memory
  * and state inspection. Separated from [KAgentRuntime] to keep execution
  * and observability concerns decoupled.
  *
- * ### v0.6.1 capabilities:
+ * ### v0.6.2 capabilities:
  * - [timeline] — reconstruct a causal DAG ([TimelineGraph]) from stored events
+ * - [query] — access the [TimelineQueryEngine] for a trace
+ * - [inspect] / [children] / [parents] — node-level graph navigation
  * - [inspectState] — return state snapshot by version (deferred to v0.6.1)
  * - [queryEvents] — filter events by trace, type, time range
  *
  * Usage:
  * ```kotlin
  * val dbg = runtime.debugger()
+ *
+ * // Full DAG with indices
  * val graph = dbg.timeline("trace_123")
- * graph?.edges?.forEach { edge ->
- *     println("${edge.type}: ${edge.fromNodeId} → ${edge.toNodeId}")
- * }
+ *
+ * // Query engine
+ * val engine = dbg.query("trace_123")
+ * val steps = engine?.byStep("process")
+ * val critical = engine?.criticalPath()
+ *
+ * // Graph navigation
+ * val node = dbg.inspect("node_3_trace_123")
+ * val children = dbg.children("node_3_trace_123")
  * ```
  */
 class RuntimeDebugger(
@@ -32,25 +42,30 @@ class RuntimeDebugger(
     private val memory: Memory
 ) {
 
-    private val timelineBuilder = TimelineBuilder()
+    private val projection = TimelineProjection()
+    private val graphCache = mutableMapOf<String, TimelineGraph>()
+    private val nodeTraceLookup = mutableMapOf<String, String>() // nodeId -> traceId
 
     // ================================================================
-    // Timeline
+    // Timeline graph reconstruction
     // ================================================================
 
     /**
      * Reconstruct the execution timeline DAG for a given [traceId].
      *
-     * Returns a [TimelineGraph] with causality edges linking
-     * StepStart↔StepEnd, ToolCall↔ToolResult, and sequential ordering,
-     * or null if no events exist for this traceId.
+     * Returns a [TimelineGraph] with pre-built [TimelineIndices] for
+     * fast query access, or null if no events exist for this traceId.
      *
-     * @param traceId The execution trace to reconstruct.
-     * @return [TimelineGraph] or null.
+     * Results are cached — subsequent calls return the same graph.
      */
     fun timeline(traceId: String): TimelineGraph? {
-        val events = eventStore.getEvents(traceId)
-        return timelineBuilder.build(events)
+        if (traceId !in graphCache) {
+            val events = eventStore.getEvents(traceId)
+            val graph = projection.project(events) ?: return null
+            graph.nodes.forEach { nodeTraceLookup[it.id] = traceId }
+            graphCache[traceId] = graph
+        }
+        return graphCache[traceId]
     }
 
     /**
@@ -61,6 +76,52 @@ class RuntimeDebugger(
             .map { it.traceId }
             .distinct()
             .sorted()
+    }
+
+    // ================================================================
+    // Query engine access
+    // ================================================================
+
+    /**
+     * Access the [TimelineQueryEngine] for a given [traceId].
+     * Returns null if the trace has no events.
+     */
+    fun query(traceId: String): TimelineQueryEngine? {
+        val graph = timeline(traceId) ?: return null
+        return TimelineQueryEngine(graph)
+    }
+
+    /**
+     * Inspect a specific node by its ID.
+     * Searches across all cached traces.
+     */
+    fun inspect(nodeId: String): TimelineNode? {
+        val traceId = nodeTraceLookup[nodeId] ?: return null
+        return graphCache[traceId]?.indices?.byNodeId?.get(nodeId)
+    }
+
+    /**
+     * Direct children of a node (forward adjacency).
+     * Node must have been accessed via [timeline] first.
+     */
+    fun children(nodeId: String): List<TimelineNode> {
+        val traceId = nodeTraceLookup[nodeId] ?: return emptyList()
+        val graph = graphCache[traceId] ?: return emptyList()
+        return graph.indices.adjacency[nodeId]
+            ?.mapNotNull { graph.indices.byNodeId[it] }
+            ?: emptyList()
+    }
+
+    /**
+     * Direct parents of a node (reverse adjacency).
+     * Node must have been accessed via [timeline] first.
+     */
+    fun parents(nodeId: String): List<TimelineNode> {
+        val traceId = nodeTraceLookup[nodeId] ?: return emptyList()
+        val graph = graphCache[traceId] ?: return emptyList()
+        return graph.indices.reverseAdjacency[nodeId]
+            ?.mapNotNull { graph.indices.byNodeId[it] }
+            ?: emptyList()
     }
 
     // ================================================================

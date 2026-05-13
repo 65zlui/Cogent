@@ -43,7 +43,7 @@ class KAgentRuntime internal constructor(
     internal val executionBlock: suspend KAgentRuntimeScope.() -> Unit = {}
 ) {
     private val runtimeInterceptors = mutableListOf<RuntimeInterceptor>()
-    internal val eventStore = EventStore()
+    val eventStore = EventStore()
 
     // ================================================================
     // v0.4 API — unchanged, fully backward compatible
@@ -284,9 +284,9 @@ class KAgentRuntime internal constructor(
     }
 
     /**
-     * Access the runtime debugger for execution analysis.
+     * Access memory state for debugger integration (kagent-debugger module).
      */
-    fun debugger(): RuntimeDebugger = RuntimeDebugger(eventStore, heart.getMemory())
+    fun getDebuggerMemory(): Memory = heart.getMemory()
 
     /**
      * Create a scope with current interceptors.

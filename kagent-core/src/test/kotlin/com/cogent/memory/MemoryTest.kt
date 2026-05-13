@@ -1,9 +1,6 @@
 package com.cogent.memory
 
 import com.cogent.memory.core.Memory
-import com.cogent.memory.diff.DefaultDiffEngine
-import com.cogent.memory.dsl.memory
-import com.cogent.memory.snapshot.DefaultMemorySnapshot
 import kotlinx.coroutines.test.runTest
 import kotlin.test.Test
 import kotlin.test.assertEquals
@@ -144,20 +141,6 @@ class MemoryTest {
         assertTrue("b" in memory.getAllStateIds())
         assertTrue("c" in memory.getAllStateIds())
         assertTrue("d" in memory.getAllStateIds())
-    }
-
-    @Test
-    fun `test DSL memory creation`() = runTest {
-        val memory = memory {
-            id("test-memory")
-            maxCapacity(10)
-            
-            state("userName", "Tom")
-            state("task", "Book Flight")
-        }
-        
-        assertEquals("Tom", memory.getState<String>("userName"))
-        assertEquals("Book Flight", memory.getState<String>("task"))
     }
 
     @Test

@@ -195,3 +195,17 @@ data class EventFilter(
     val fromTimestamp: Long? = null,
     val toTimestamp: Long? = null
 )
+
+/**
+ * Cross-module extension function: access the runtime debugger.
+ *
+ * Defined in kagent-debugger to avoid circular dependency:
+ * kagent-protocol → kagent-debugger → kagent-protocol
+ *
+ * Usage:
+ * ```kotlin
+ * val dbg = runtime.debugger()
+ * val graph = dbg.timeline("trace_123")
+ * ```
+ */
+fun KAgentRuntime.debugger(): RuntimeDebugger = RuntimeDebugger(eventStore, getDebuggerMemory())

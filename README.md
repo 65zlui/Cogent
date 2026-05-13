@@ -2,7 +2,20 @@
 
 > JVM-Native Agent Execution Protocol & Runtime — Execution Observability Infrastructure
 
-Cogent is a Kotlin agent runtime that brings UI-runtime abstractions — Snapshot, Derived State, Dependency Tracking, Fiber Scheduling — to the Agent state management domain. v0.6+ focuses on **execution observability infrastructure**: making agent execution observable, navigable, and analyzable through a DAG-based timeline model with graph-native query capabilities.
+Cogent is a Kotlin agent runtime that brings UI-runtime abstractions — Snapshot, Derived State, Dependency Tracking, Fiber Scheduling — to the Agent state management domain. 
+
+**v0.6** focuses on **execution observability infrastructure**: making agent execution observable, navigable, and analyzable through a DAG-based timeline model with graph-native query capabilities.  
+**v0.7** (in progress) adds a **Visual Runtime Inspector** — a Compose-based desktop UI for timeline visualization, state inspection, and execution replay.
+
+The project is organized as a **5-module Gradle project**:
+
+| Module | Responsibility | Status |
+|--------|---------------|--------|
+| `kagent-core` | Runtime kernel (memory, fiber, trace) | ✅ Stable |
+| `kagent-protocol` | Execution protocol (execute/stream/trace) | ✅ Stable |
+| `kagent-debugger` | Debug & timeline analysis (DAG, query engine) | ✅ Maturing |
+| `kagent-inspector` | Visual runtime inspector UI | 🧠 v0.7 |
+| `kagent-demo` | Demo applications | 🔄 Evolving |
 
 ## Quick Start
 
@@ -69,41 +82,53 @@ engine?.let { q ->
 ## Architecture Overview
 
 ```
-┌──────────────────────────────────────────────────────────┐
-│              Cogent Runtime (v0.6)                       │
-│                   KAgentRuntime                          │
-├──────────────────────────────────────────────────────────┤
-│  Execution Protocol              Observability           │
-│  ┌────────────────────┐         ┌──────────────────────┐ │
-│  │ execute()          │         │ RuntimeDebugger       │ │
-│  │ stream() ──────────┼─events─→│  ├─ timeline(traceId) │ │
-│  │ trace()            │         │  ├─ query(traceId)    │ │
-│  └────────┬───────────┘         │  ├─ inspect(nodeId)   │ │
-│           │                     │  ├─ queryEvents()     │ │
-│           ▼                     │  └─ inspectState(v)   │ │
-│  ┌──────────────────────────────┴───────────────┐       │
-│  │          Observability Pipeline              │       │
-│  │  EventStore → TimelineProjection             │       │
-│  │    → TimelineGraph (indices)                 │       │
-│  │    → TimelineQueryEngine → Debugger          │       │
-│  │  Edges: SEQUENTIAL / CAUSAL / TOOL_FLOW      │       │
-│  └──────────────────────────────────────────────┘       │
-│                                                          │
-│  Internal Subsystems:                                    │
-│  ┌──────────────┐  ┌────────────────┐  ┌──────────────┐ │
-│  │AgentScheduler│◄→│  RuntimeHeart   │  │   Memory     │ │
-│  │ (Task Queue) │  │ (Orchestration) │  │ (State Store)│ │
-│  └──────┬───────┘  └────────┬───────┘  └──────┬───────┘ │
-│         │                   │                  │         │
-│  ┌──────┴───────┐  ┌───────┴────────┐         │         │
-│  │ Fiber Tasks  │  │DependencyTracker│         │         │
-│  │ (Scheduling) │  │ (Auto-tracking)│         │         │
-│  └──────────────┘  └────────────────┘         │         │
-│                                                │         │
-│  ┌─────────────────────────────────────────────┘         │
-│  │  InvalidationGraph → DerivedState → Snapshot/Diff     │
-│  └───────────────────────────────────────────────────────┘
-└──────────────────────────────────────────────────────────┘
+┌────────────────────────────────────────────────────────────────────┐
+│            kagent-inspector — Visual Runtime Inspector            │
+│            (v0.7, Compose for Desktop / Skia)                     │
+│  ┌────────────────┐ ┌─────────────────┐ ┌──────────────────────┐  │
+│  │ Timeline DAG   │ │ State Inspector │ │ Replay Player        │  │
+│  │ Graph Viewer   │ │ Live values at  │ │ Step-through         │  │
+│  │ (zoom/pan/filter)││ any graph node │ │ execution replay     │  │
+│  └───────┬────────┘ └───────┬─────────┘ └──────────┬───────────┘  │
+│          │                  │                       │              │
+│          └──────────────────┼───────────────────────┘              │
+│                             │ debugs via                            │
+└─────────────────────────────┼──────────────────────────────────────┘
+                              │
+┌─────────────────────────────┼──────────────────────────────────────┐
+│              Cogent Runtime (v0.6)                                 │
+│                   KAgentRuntime                                    │
+├────────────────────────────────────────────────────────────────────┤
+│  Execution Protocol              Observability                     │
+│  ┌────────────────────┐         ┌────────────────────────────┐    │
+│  │ execute()          │         │ RuntimeDebugger             │    │
+│  │ stream() ──────────┼─events─→│  ├─ timeline(traceId) → DAG│    │
+│  │ trace()            │         │  ├─ query(traceId) → engine│    │
+│  └────────┬───────────┘         │  ├─ inspect(nodeId)        │    │
+│           │                     │  ├─ children/parents       │    │
+│           ▼                     │  └─ queryEvents(filter)    │    │
+│  ┌──────────────────────────────┴─────────────────────┐         │    │
+│  │          Observability Pipeline                     │         │    │
+│  │  EventStore → TimelineProjection                    │         │    │
+│  │    → TimelineGraph (SEQUENTIAL/CAUSAL/TOOL_FLOW)   │         │    │
+│  │    → TimelineIndices → TimelineQueryEngine         │         │    │
+│  └────────────────────────────────────────────────────┘         │    │
+│                                                                   │    │
+│  Internal Subsystems:                                             │    │
+│  ┌──────────────┐  ┌────────────────┐  ┌────────────────────┐   │    │
+│  │AgentScheduler│◄→│  RuntimeHeart   │  │   Memory           │   │    │
+│  │ (Task Queue) │  │ (Orchestration) │  │ (State + Snapshot) │   │    │
+│  └──────┬───────┘  └────────┬───────┘  └────────────────────┘   │    │
+│         │                   │                                     │    │
+│  ┌──────┴───────┐  ┌───────┴────────┐                            │    │
+│  │ Fiber Tasks  │  │DependencyTracker│                            │    │
+│  │ (Scheduling) │  │ (Auto-tracking)│                            │    │
+│  └──────────────┘  └────────────────┘                            │    │
+│                                                                   │    │
+│  ┌────────────────────────────────────────────────────────┐      │    │
+│  │  InvalidationGraph → DerivedState → Snapshot/Diff/Replay│      │    │
+│  └────────────────────────────────────────────────────────┘      │    │
+└────────────────────────────────────────────────────────────────────┘
 ```
 
 ## Observability Data Flow
@@ -138,6 +163,12 @@ TimelineQueryEngine → graph-native queries
     │
     ▼
 RuntimeDebugger → unified API for query + inspect + navigate
+    │
+    ▼
+kagent-inspector (v0.7) → Visual Runtime Inspector
+    │  ├── Timeline DAG Viewer (interactive graph)
+    │  ├── State Inspector (node-level state lookup)
+    │  └── Replay Player (step-through execution)
 ```
 
 ## API Reference
@@ -395,22 +426,74 @@ runtime.addRuntimeInterceptor { request, chain ->
 }
 ```
 
-## Internal Modules
+## Modules
 
-The following modules are `internal` and should not be used directly:
+The project is a **5-module Gradle project**. See the [Module Architecture](#architecture-overview) section above for the dependency graph and lifecycle alignment.
 
-| Module | Responsibility |
-|--------|---------------|
-| `RuntimeHeart` | Orchestration — ties memory, dependency tracking, and scheduling |
-| `AgentScheduler` | Task scheduling with priority-based execution and worker pool |
-| `Memory` | Thread-safe state store with snapshot/restore, LRU eviction |
-| `DependencyTracker` | Automatic dependency tracking via ThreadLocal observation context |
-| `InvalidationGraph` | Dependency relationship management and invalidation propagation |
-| `DerivedState` | Computed states that auto-recompute on dependency changes |
-| `EventStore` | Bounded, thread-safe event log with monotonic stateVersion |
-| `TimelineBuilder` | Internal DAG constructor — builds TimelineGraph edges from flat events |
-| `TimelineProjection` | Production entry point — TimelineBuilder + TimelineIndices.build() (v0.6.2+) |
-| `TimelineQueryEngine` | Graph-native query interface — byStep/byTool/criticalPath/descendants (v0.6.2+) |
+| Gradle module | Public API | Internal components |
+|---------------|-----------|-------------------|
+| `kagent-core` | — | `Memory`, `AgentScheduler`, `RuntimeHeart`, `DependencyTracker`, `InvalidationGraph`, `DerivedState` |
+| `kagent-protocol` | `KAgentRuntime`, `kAgentRuntime()`, `AgentRequest/Response`, `RuntimeEvent`, `RuntimeState`, `StateChange`, `RuntimeSnapshot`, `StepInterceptor`, `RuntimeInterceptor` | `EventStore` |
+| `kagent-debugger` | `RuntimeDebugger`, `TimelineGraph`, `TimelineNode`, `TimelineEdge`, `EdgeType`, `TimelineIndices`, `TimelineQueryEngine`, `EventFilter`, `ExecutionSpan` | `TimelineBuilder`, `TimelineProjection` |
+| `kagent-inspector` | *(v0.7 — Visual Runtime Inspector)* | *(Compose/Skia Desktop UI)* |
+| `kagent-demo` | — | Demo applications |
+
+### Internal Runtime Components
+
+These runtime internals are **not public API** and should not be used directly:
+
+| Component | Module | Responsibility |
+|-----------|--------|---------------|
+| `RuntimeHeart` | `kagent-core` | Orchestration — ties memory, dependency tracking, and scheduling |
+| `AgentScheduler` | `kagent-core` | Task scheduling with priority-based execution and worker pool |
+| `Memory` | `kagent-core` | Thread-safe state store with snapshot/restore, LRU eviction |
+| `DependencyTracker` | `kagent-core` | Automatic dependency tracking via ThreadLocal observation context |
+| `InvalidationGraph` | `kagent-core` | Dependency relationship management and invalidation propagation |
+| `DerivedState` | `kagent-core` | Computed states that auto-recompute on dependency changes |
+| `EventStore` | `kagent-protocol` | Bounded, thread-safe event log with monotonic stateVersion |
+| `TimelineBuilder` | `kagent-debugger` | Internal DAG constructor — builds TimelineGraph edges from flat events |
+| `TimelineProjection` | `kagent-debugger` | Production entry point — TimelineBuilder + TimelineIndices.build() (v0.6.2+) |
+| `TimelineQueryEngine` | `kagent-debugger` | Graph-native query interface — byStep/byTool/criticalPath/descendants (v0.6.2+) |
+
+## v0.7 — Visual Runtime Inspector (In Progress)
+
+The v0.7 release adds a **Compose for Desktop** visual inspector — a standalone desktop application that connects to the runtime debugger and provides interactive visualization of agent execution.
+
+### Planned capabilities
+
+| Feature | Description | Status |
+|---------|-------------|--------|
+| **Timeline DAG Viewer** | Interactive graph view of execution timeline. Zoom, pan, filter by event type. Nodes show step/tool/state-change events; edges show SEQUENTIAL/CAUSAL/TOOL_FLOW relationships. | 🧠 Planned |
+| **State Inspector** | Select any graph node to inspect memory state at that point in the execution. Shows all key-value pairs with version and timestamp. | 🧠 Planned |
+| **Replay Player** | Step-through execution replay — play/pause/seek across the timeline. Each step animates state changes in the inspector panel. | 🔬 Research |
+| **Critical Path Highlight** | Automatically highlight the critical path (longest-duration chain) in the timeline graph. | 🧠 Planned |
+| **Multi-trace Comparison** | Side-by-side comparison of multiple execution traces. | 🔬 Research |
+
+### Architecture
+
+The inspector lives in `kagent-inspector/` — a separate module with no reverse dependency on the runtime. It communicates with the runtime exclusively through the `RuntimeDebugger` API:
+
+```
+kagent-inspector (Compose UI)
+    │  calls RuntimeDebugger API (via kagent-debugger module)
+    ▼
+RuntimeDebugger → TimelineQueryEngine → TimelineProjection → EventStore
+```
+
+This design ensures:
+- **No UI dependency leaks** into the runtime kernel
+- **Independent iteration** — the inspector can evolve at its own pace
+- **Pluggable** — alternative inspectors (CLI, web, IDE plugin) can use the same debugger API
+
+### Why Compose for Desktop
+
+| Requirement | Choice |
+|------------|--------|
+| Rich graph rendering | Canvas API + custom layout engine |
+| Cross-platform | Compose Desktop (macOS/Linux/Windows) |
+| No JVM WebSocket server | Desktop app connects in-process |
+| Familiar Kotlin API | No HTML/CSS/JS — pure Kotlin |
+| Future Android support | Compose Multiplatform → shared UI code |
 
 ## Version History
 
@@ -424,6 +507,7 @@ The following modules are `internal` and should not be used directly:
 | v0.6 | Observability Plane | RuntimeDebugger, EventStore, stateVersion, EventFilter, queryEvents, trace() API |
 | v0.6.1 | Timeline DAG | TimelineGraph, TimelineEdge, EdgeType (SEQUENTIAL/CAUSAL/TOOL_FLOW), causal linking, nested step pairing, filterByType |
 | v0.6.2 | Queryable Execution Graph | TimelineProjection, TimelineIndices (immutable), TimelineQueryEngine (byStep/byTool/byTimeRange/descendants/ancestors/children/parents/criticalPath/filterByType), ExecutionSpan placeholder, expanded RuntimeDebugger API (query/inspect/children/parents) |
+| v0.7 | Visual Runtime Inspector | *(in progress)* Timeline DAG Viewer, State Inspector, Replay Player, Critical Path Highlight |
 
 ## Building
 

@@ -262,3 +262,119 @@ fun KAgentRuntime.debugger(): RuntimeDebugger  // debugger access
 
 Any future module (profiler, audit logger, metrics collector) can follow the same pattern without modifying the runtime kernel.
 
+## System Architecture
+
+```
+ ┌─────────────────────────────────────────────────────────────────────┐
+ │                         kagent-demo                                │
+ │  ┌──────────────────────────────────────────────────────────────┐  │
+ │  │  Demo: Observability Pipeline Walkthrough                    │  │
+ │  │  execute → stream → timeline → query → inspect → debug       │  │
+ │  └──────────────────────────────────────────────────────────────┘  │
+ └─────────────────────────────────────────────────────────────────────┘
+                                    │ uses
+ ┌──────────────────────────────────┼──────────────────────────────────┐
+ │                    kagent-inspector (v0.7)     │                    │
+ │  ┌─────────────────────────────────────────────────────────────┐   │
+ │  │  Visual Runtime Inspector (Compose/Skia Desktop)            │   │
+ │  │                                                             │   │
+ │  │  ┌─────────────────┐ ┌──────────────┐ ┌──────────────────┐ │   │
+ │  │  │ Timeline DAG    │ │ State        │ │ Replay           │ │   │
+ │  │  │ Graph Viewer    │ │ Inspector    │ │ Player           │ │   │
+ │  │  │ (zoom/pan/filter)│ │ (live values)│ │ (step-through)  │ │   │
+ │  │  └────────┬────────┘ └──────┬───────┘ └────────┬─────────┘ │   │
+ │  │           │                 │                   │           │   │
+ │  │           └─────────────────┼───────────────────┘           │   │
+ │  │                             │ queries via                    │   │
+ │  └─────────────────────────────┼───────────────────────────────┘   │
+ └─────────────────────────────────┼──────────────────────────────────┘
+                                   │
+ ┌─────────────────────────────────┼──────────────────────────────────┐
+ │                    kagent-debugger               │                  │
+ │  ┌──────────────────────────────────────────────────────────────┐  │
+ │  │         RuntimeDebugger — Observability API                 │  │
+ │  │  timeline(traceId) → reconstruct execution DAG              │  │
+ │  │  query(traceId)    → access TimelineQueryEngine             │  │
+ │  │  inspect(nodeId)   → node lookup across traces              │  │
+ │  │  children/parents  → graph navigation                       │  │
+ │  └───────────────────────────┬──────────────────────────────────┘  │
+ │  ┌───────────────────────────┼──────────────────────────────────┐  │
+ │  │          TimelineProjection + TimelineQueryEngine           │  │
+ │  │                                                             │  │
+ │  │  RuntimeEvent → EventStore → TimelineProjection            │  │
+ │  │    ↓ TimelineGraph (nodes + edges + indices)               │  │
+ │  │    ↓ TimelineQueryEngine (byStep/byTool/criticalPath/... ) │  │
+ │  │                                                             │  │
+ │  │  Edge types: SEQUENTIAL | CAUSAL | TOOL_FLOW               │  │
+ │  └─────────────────────────────────────────────────────────────┘  │
+ └─────────────────────────────────┬──────────────────────────────────┘
+                                   │ recorded during
+ ┌─────────────────────────────────┼──────────────────────────────────┐
+ │                    kagent-protocol               │                  │
+ │  ┌──────────────────────────────────────────────────────────────┐  │
+ │  │     Execution Protocol + KAgentRuntime Facade                │  │
+ │  │                                                              │  │
+ │  │  execute(AgentRequest) → AgentResponse                       │  │
+ │  │  stream(AgentRequest)  → Flow<RuntimeEvent>                  │  │
+ │  │  trace(traceId)        → List<RuntimeEvent>                  │  │
+ │  │                                                              │  │
+ │  │  step() / setState() / getState() — execution DSL            │  │
+ │  │  checkpoint / replayToCheckpoint — state management          │  │
+ │  │  RuntimeInterceptor — OkHttp-style control plane             │  │
+ │  └──────────────────────────────────────────────────────────────┘  │
+ └─────────────────────────────────┬──────────────────────────────────┘
+                                   │ runs on
+ ┌─────────────────────────────────┼──────────────────────────────────┐
+ │                    kagent-core  │                                  │
+ │  ┌──────────────────────────────────────────────────────────────┐  │
+ │  │              Reactive Memory & Fiber Scheduler               │  │
+ │  │                                                              │  │
+ │  │  ┌──────────────┐  ┌──────────────┐  ┌──────────────────┐   │  │
+ │  │  │    Memory     │  │ Dependency   │  │   Fiber          │   │  │
+ │  │  │  Snapshot/Diff│  │ Graph        │  │   Scheduler      │   │  │
+ │  │  │  LRU Eviction │  │ Derived State│  │   RuntimeHeart   │   │  │
+ │  │  │  State Store  │  │ Invalidation │  │   Task Queue     │   │  │
+ │  │  └──────────────┘  └──────────────┘  └──────────────────┘   │  │
+ │  └──────────────────────────────────────────────────────────────┘  │
+ └─────────────────────────────────────────────────────────────────────┘
+```
+
+### Data flow through the stack
+
+```
+Agent Code                          (user-defined step{} blocks)
+    │
+    ▼
+KAgentRuntime.execute/stream()      (kagent-protocol)
+    │  emit RuntimeEvent subtypes
+    ▼
+EventStore.record()                 (kagent-protocol)
+    │  assign stateVersion
+    ▼
+TimelineProjection.project()        (kagent-debugger)
+    │  → TimelineGraph + TimelineIndices
+    ▼
+TimelineQueryEngine                 (kagent-debugger)
+    │  → criticalPath, byStep, descendants, ...
+    ▼
+RuntimeDebugger API                 (kagent-debugger)
+    │  → timeline(), query(), inspect(), children(), parents()
+    ▼
+Runtime Inspector (Compose UI)      (kagent-inspector, v0.7)
+    │  → timeline DAG visualization, state inspection
+    ▼
+Developer                           (you)
+```
+
+### Module lifecycle alignment
+
+Each module follows a distinct lifecycle cadence, aligned to its risk profile:
+
+| Module | Stability | Iteration cadence | Breaking change risk |
+|--------|-----------|------------------|---------------------|
+| `kagent-core` | Stable | Slow (weeks) | Very low — kernel must not break |
+| `kagent-protocol` | Stable | Moderate (weeks) | Low — API surface needs care |
+| `kagent-debugger` | Maturing | Fast (days–weeks) | Moderate — new query capabilities |
+| `kagent-inspector` | Experimental | Very fast (daily) | High — UI experiments, Compose API churn |
+| `kagent-demo` | Volatile | Per-demo | Highest — demo code is disposable |
+

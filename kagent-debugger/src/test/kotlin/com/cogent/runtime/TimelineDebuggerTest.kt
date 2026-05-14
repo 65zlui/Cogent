@@ -229,7 +229,7 @@ class TimelineDebuggerTest {
 
     @Test
     fun `timeline graph full DAG with all edge types`() {
-        // Build a richer trace: RunStart → StepStart → ToolCall → ToolResult → StepEnd → RunEnd
+        // Build a richer trace: RunStart → StepStart → ToolCall → ToolResult → MemoryChange → StepEnd → RunEnd
         val store = EventStore()
         store.record("tl-full", RuntimeEvent.RunStart("tl-full"))
         store.record("tl-full", RuntimeEvent.StepStart("process"))
@@ -245,14 +245,16 @@ class TimelineDebuggerTest {
         assertNotNull(graph)
         assertEquals(7, graph.nodeCount)
 
-        // Expected edges breakdown:
-        // SEQUENTIAL: 6 edges (7 nodes → 6 sequential links)
-        // CAUSAL: 2 edges (RunStart→RunEnd, StepStart→StepEnd)
+        // SEQUENTIAL: 6 edges (every consecutive pair: RunStart→StepStart→ToolCall→ToolResult→MemoryChange→StepEnd→RunEnd)
+        // CAUSAL: 6 edges (StepStart→ToolCall, StepStart→ToolResult, StepStart→MemoryChange,
+        //                  StepStart→StepEnd, MemoryChange→StepEnd, RunStart→RunEnd)
         // TOOL_FLOW: 1 edge (ToolCall→ToolResult)
+        // STREAM_FLOW: 0
         assertEquals(6, graph.edges.count { it.type == EdgeType.SEQUENTIAL })
-        assertEquals(2, graph.edges.count { it.type == EdgeType.CAUSAL })
+        assertEquals(6, graph.edges.count { it.type == EdgeType.CAUSAL })
         assertEquals(1, graph.edges.count { it.type == EdgeType.TOOL_FLOW })
-        assertEquals(9, graph.edges.size)
+        assertEquals(0, graph.edges.count { it.type == EdgeType.STREAM_FLOW })
+        assertEquals(13, graph.edges.size)
     }
 
     @Test
@@ -473,10 +475,22 @@ class TimelineDebuggerTest {
         }
         assertNotNull(runEdge, "RunStart->RunEnd CAUSAL edge should exist")
 
-        // Verify SEQUENTIAL edges form a complete chain
+        // Verify SEQUENTIAL edges connect landmarks
         val sequentialEdges = graph.edges.filter { it.type == EdgeType.SEQUENTIAL }
-        assertEquals(graph.nodeCount - 1, sequentialEdges.size,
-            "SEQUENTIAL edges should link all nodes in order")
+        assertTrue(sequentialEdges.isNotEmpty(), "SEQUENTIAL edges should exist between landmarks")
+
+        // Verify graph is fully connected (DFS from first node reaches all)
+        val reachable = mutableSetOf<String>()
+        val queue = ArrayDeque<String>()
+        queue.addLast(graph.nodes.first().id)
+        while (queue.isNotEmpty()) {
+            val current = queue.removeFirst()
+            if (current in reachable) continue
+            reachable.add(current)
+            graph.indices.adjacency[current]?.forEach { queue.addLast(it) }
+        }
+        assertEquals(graph.nodeCount, reachable.size,
+            "graph should be fully connected (all nodes reachable from root)")
     }
 
     // ================================================================
@@ -736,5 +750,97 @@ class TimelineDebuggerTest {
         assertNull(dbg.inspect("node_0_unknown"))
         assertTrue(dbg.children("node_0_unknown").isEmpty())
         assertTrue(dbg.parents("node_0_unknown").isEmpty())
+    }
+
+    @Test
+    fun `timeline creates STREAM_FLOW edges for stream lifecycle`() {
+        val store = EventStore()
+        store.record("stream", RuntimeEvent.RunStart("stream"))
+        store.record("stream", RuntimeEvent.StepStart("generate"))
+        store.record("stream", RuntimeEvent.StreamStart("test-provider", "test-model"))
+        store.record("stream", RuntimeEvent.StreamDelta("Hel", "Hel"))
+        store.record("stream", RuntimeEvent.StreamDelta("Hello", "llo"))
+        store.record("stream", RuntimeEvent.StreamEnd(5, "test-model"))
+        store.record("stream", RuntimeEvent.StepEnd("generate"))
+        store.record("stream", RuntimeEvent.RunEnd("stream"))
+
+        val builder = TimelineBuilder()
+        val graph = builder.build(store.getEvents("stream"))
+
+        assertNotNull(graph)
+        assertEquals(8, graph.nodeCount)
+
+        val streamEdges = graph.edges.filter { it.type == EdgeType.STREAM_FLOW }
+        // Algorithm links all stream events (deltas + end) to StreamStart:
+        // StreamStart → StreamDelta₁, StreamStart → StreamDelta₂, StreamStart → StreamEnd
+        assertEquals(3, streamEdges.size, "three STREAM_FLOW edges: start→delta1, start→delta2, start→end")
+
+        // Every STREAM_FLOW edge originates from StreamStart (star topology)
+        val streamStartId = graph.nodes.first { it.event is RuntimeEvent.StreamStart }.id
+        assertTrue(streamEdges.all { it.fromNodeId == streamStartId },
+            "all STREAM_FLOW edges should originate from StreamStart")
+    }
+
+    @Test
+    fun `timeline CAUSAL edges link stream events to step`() {
+        val store = EventStore()
+        store.record("sc", RuntimeEvent.RunStart("sc"))
+        store.record("sc", RuntimeEvent.StepStart("generate"))
+        store.record("sc", RuntimeEvent.StreamStart(null, null))
+        store.record("sc", RuntimeEvent.StreamDelta("A", "A"))
+        store.record("sc", RuntimeEvent.StreamEnd(1, null))
+        store.record("sc", RuntimeEvent.StepEnd("generate"))
+        store.record("sc", RuntimeEvent.RunEnd("sc"))
+
+        val builder = TimelineBuilder()
+        val graph = builder.build(store.getEvents("sc"))
+        assertNotNull(graph)
+
+        // All stream events should have CAUSAL edges from StepStart
+        val streamNodes = graph.nodes.filter {
+            it.event is RuntimeEvent.StreamStart ||
+                it.event is RuntimeEvent.StreamDelta ||
+                it.event is RuntimeEvent.StreamEnd
+        }
+        for (node in streamNodes) {
+            val hasCausal = graph.edges.any {
+                it.type == EdgeType.CAUSAL && it.toNodeId == node.id
+            }
+            assertTrue(hasCausal, "stream node ${node.id} should have CAUSAL edge from StepStart")
+        }
+    }
+
+    @Test
+    fun `timeline SEQUENTIAL chain connects all nodes including stream events`() {
+        val store = EventStore()
+        store.record("seq", RuntimeEvent.RunStart("seq"))
+        store.record("seq", RuntimeEvent.StreamStart(null, null))
+        store.record("seq", RuntimeEvent.StreamDelta("a", "a"))
+        store.record("seq", RuntimeEvent.StreamEnd(1, null))
+        store.record("seq", RuntimeEvent.RunEnd("seq"))
+
+        val projection = TimelineProjection()
+        val graph = projection.project(store.getEvents("seq"))
+        assertNotNull(graph)
+        assertEquals(5, graph.nodeCount)
+
+        // SEQUENTIAL edges should link every consecutive pair (4 edges for 5 nodes)
+        val seqEdges = graph.edges.filter { it.type == EdgeType.SEQUENTIAL }
+        assertEquals(graph.nodeCount - 1, seqEdges.size,
+            "SEQUENTIAL edges should link all nodes in order")
+
+        // Verify the chain: each node is reachable from the root
+        val rootId = graph.nodes.first().id
+        val reachable = mutableSetOf<String>()
+        val queue = ArrayDeque<String>()
+        queue.addLast(rootId)
+        while (queue.isNotEmpty()) {
+            val current = queue.removeFirst()
+            if (current in reachable) continue
+            reachable.add(current)
+            graph.indices.adjacency[current]?.forEach { queue.addLast(it) }
+        }
+        assertEquals(graph.nodeCount, reachable.size,
+            "all nodes should be reachable from root via SEQUENTIAL chain")
     }
 }

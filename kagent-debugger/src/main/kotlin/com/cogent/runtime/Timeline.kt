@@ -57,14 +57,16 @@ data class Timeline(
  *
  * | Type | Source → Target | Semantics |
  * |------|----------------|-----------|
- * | SEQUENTIAL | node[N] → node[N+1] | Chronological event ordering |
- * | CAUSAL | StepStart → StepEnd | Execution scope boundary |
+ * | SEQUENTIAL | landmark → landmark | Chronological ordering of significant events |
+ * | CAUSAL | StepStart → contained event | Execution scope containment |
  * | TOOL_FLOW | ToolCall → ToolResult | Tool invocation lifecycle |
+ * | STREAM_FLOW | StreamStart → StreamDelta → StreamEnd | Streaming output lifecycle |
  */
 enum class EdgeType {
     SEQUENTIAL,
     CAUSAL,
-    TOOL_FLOW
+    TOOL_FLOW,
+    STREAM_FLOW
 }
 
 /**
@@ -265,49 +267,123 @@ internal class TimelineBuilder {
     /**
      * Construct DAG edges from an ordered node list.
      *
-     * Produces three edge types:
-     * 1. [EdgeType.SEQUENTIAL] — between every consecutive node pair
-     * 2. [EdgeType.CAUSAL] — pairing StepStart↔StepEnd and RunStart↔RunEnd via stack
+     * Produces four edge types:
+     * 1. [EdgeType.SEQUENTIAL] — between every consecutive node (chronological backbone).
+     *    This guarantees full connectivity: every node has at least one incoming edge
+     *    from its immediate predecessor, and one outgoing edge to its successor.
+     * 2. [EdgeType.CAUSAL] — StepStart → each contained event, last contained → StepEnd, RunStart↔RunEnd
      * 3. [EdgeType.TOOL_FLOW] — pairing ToolCall↔ToolResult via stack
+     * 4. [EdgeType.STREAM_FLOW] — pairing StreamStart→StreamDelta→StreamEnd via stack
+     *
+     * Note: MemoryChange and other non-step events fire asynchronously because
+     * [RuntimeHeart.step] schedules tasks via `scope.launch`. Their chronological
+     * position may not align with their logical step boundary. The SEQUENTIAL chain
+     * guarantees connectivity; CAUSAL edges are best-effort semantic enrichment.
      */
     private fun buildEdges(nodes: List<TimelineNode>): List<TimelineEdge> {
         val edges = mutableListOf<TimelineEdge>()
         val stepStack = ArrayDeque<String>()   // pending StepStart node IDs
         val toolStack = ArrayDeque<String>()   // pending ToolCall node IDs
+        val streamStack = ArrayDeque<String>() // pending StreamStart node IDs
         var runStartNodeId: String? = null
+        var prevNodeId: String? = null
 
-        for ((index, node) in nodes.withIndex()) {
-            // 1. SEQUENTIAL: chronological backbone
-            if (index > 0) {
+        // Track in-scope node IDs per step for StepStart→contained and last→StepEnd edges
+        val stepContained = mutableMapOf<String, MutableList<String>>()
+
+        for (node in nodes) {
+            // 1. SEQUENTIAL: link every consecutive node — guarantees full graph connectivity
+            if (prevNodeId != null) {
                 edges.add(TimelineEdge(
-                    fromNodeId = nodes[index - 1].id,
+                    fromNodeId = prevNodeId,
                     toNodeId = node.id,
                     type = EdgeType.SEQUENTIAL
                 ))
             }
+            prevNodeId = node.id
 
-            // 2. Scope/causality pairing and tool flow
+            // 2. Scope/causality, tool flow, and stream flow pairing
             when (node.event) {
                 is RuntimeEvent.RunStart -> runStartNodeId = node.id
+
                 is RuntimeEvent.RunEnd -> {
                     val startId = runStartNodeId
                     if (startId != null) {
                         edges.add(TimelineEdge(startId, node.id, EdgeType.CAUSAL))
                     }
                 }
-                is RuntimeEvent.StepStart -> stepStack.addLast(node.id)
+
+                is RuntimeEvent.StepStart -> {
+                    stepStack.addLast(node.id)
+                    stepContained[node.id] = mutableListOf()
+                }
+
                 is RuntimeEvent.StepEnd -> {
                     if (stepStack.isNotEmpty()) {
-                        edges.add(TimelineEdge(stepStack.removeLast(), node.id, EdgeType.CAUSAL))
+                        val stepStartId = stepStack.removeLast()
+                        edges.add(TimelineEdge(stepStartId, node.id, EdgeType.CAUSAL))
+                        // Link last contained event → StepEnd
+                        val contained = stepContained[stepStartId]
+                        if (!contained.isNullOrEmpty()) {
+                            edges.add(TimelineEdge(contained.last(), node.id, EdgeType.CAUSAL))
+                        }
+                        stepContained.remove(stepStartId)
                     }
                 }
-                is RuntimeEvent.ToolCall -> toolStack.addLast(node.id)
+
+                is RuntimeEvent.ToolCall -> {
+                    toolStack.addLast(node.id)
+                    if (stepStack.isNotEmpty()) {
+                        edges.add(TimelineEdge(stepStack.last(), node.id, EdgeType.CAUSAL))
+                        stepContained[stepStack.last()]?.add(node.id)
+                    }
+                }
+
                 is RuntimeEvent.ToolResult -> {
                     if (toolStack.isNotEmpty()) {
                         edges.add(TimelineEdge(toolStack.removeLast(), node.id, EdgeType.TOOL_FLOW))
                     }
+                    if (stepStack.isNotEmpty()) {
+                        edges.add(TimelineEdge(stepStack.last(), node.id, EdgeType.CAUSAL))
+                        stepContained[stepStack.last()]?.add(node.id)
+                    }
                 }
-                else -> { /* MemoryChange, DerivedRecompute — no scope edges */ }
+
+                is RuntimeEvent.StreamStart -> {
+                    streamStack.addLast(node.id)
+                    if (stepStack.isNotEmpty()) {
+                        edges.add(TimelineEdge(stepStack.last(), node.id, EdgeType.CAUSAL))
+                        stepContained[stepStack.last()]?.add(node.id)
+                    }
+                }
+
+                is RuntimeEvent.StreamDelta -> {
+                    if (streamStack.isNotEmpty()) {
+                        edges.add(TimelineEdge(streamStack.last(), node.id, EdgeType.STREAM_FLOW))
+                    }
+                    if (stepStack.isNotEmpty()) {
+                        edges.add(TimelineEdge(stepStack.last(), node.id, EdgeType.CAUSAL))
+                        stepContained[stepStack.last()]?.add(node.id)
+                    }
+                }
+
+                is RuntimeEvent.StreamEnd -> {
+                    val streamStartId = if (streamStack.isNotEmpty()) streamStack.removeLast() else null
+                    if (streamStartId != null) {
+                        edges.add(TimelineEdge(streamStartId, node.id, EdgeType.STREAM_FLOW))
+                    }
+                    if (stepStack.isNotEmpty()) {
+                        edges.add(TimelineEdge(stepStack.last(), node.id, EdgeType.CAUSAL))
+                        stepContained[stepStack.last()]?.add(node.id)
+                    }
+                }
+
+                is RuntimeEvent.MemoryChange, is RuntimeEvent.DerivedRecompute -> {
+                    if (stepStack.isNotEmpty()) {
+                        edges.add(TimelineEdge(stepStack.last(), node.id, EdgeType.CAUSAL))
+                        stepContained[stepStack.last()]?.add(node.id)
+                    }
+                }
             }
         }
 

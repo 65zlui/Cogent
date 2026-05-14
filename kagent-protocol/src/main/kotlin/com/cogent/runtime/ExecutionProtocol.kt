@@ -81,6 +81,24 @@ sealed class RuntimeEvent {
     /** Execution completed for the given traceId. */
     data class RunEnd(val traceId: String) : RuntimeEvent()
 
+    /** Streaming output started. */
+    data class StreamStart(
+        val provider: String? = null,
+        val model: String? = null
+    ) : RuntimeEvent()
+
+    /** A windowed chunk of streaming output. */
+    data class StreamDelta(
+        val accumulated: String,
+        val deltaContent: String
+    ) : RuntimeEvent()
+
+    /** Streaming output completed. */
+    data class StreamEnd(
+        val totalLength: Int,
+        val model: String? = null
+    ) : RuntimeEvent()
+
     override fun toString(): String = when (this) {
         is RunStart -> "RunStart($traceId)"
         is StepStart -> "StepStart($stepId)"
@@ -90,6 +108,9 @@ sealed class RuntimeEvent {
         is ToolResult -> "ToolResult($tool)"
         is StepEnd -> "StepEnd($stepId)"
         is RunEnd -> "RunEnd($traceId)"
+        is StreamStart -> "StreamStart(provider=$provider, model=$model)"
+        is StreamDelta -> "StreamDelta(${accumulated.length} chars, +${deltaContent.length})"
+        is StreamEnd -> "StreamEnd($totalLength chars, model=$model)"
     }
 }
 

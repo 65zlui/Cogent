@@ -102,6 +102,9 @@ fun main() = runBlocking {
                 is RuntimeEvent.DerivedRecompute -> "  DerivedRecompute(${e.key})"
                 is RuntimeEvent.ToolCall -> "ToolCall(${e.tool})"
                 is RuntimeEvent.ToolResult -> "ToolResult(${e.tool})"
+                is RuntimeEvent.StreamStart -> "StreamStart"
+                is RuntimeEvent.StreamDelta -> "  StreamDelta"
+                is RuntimeEvent.StreamEnd -> "StreamEnd"
             }
             println("    ${node.id.substringAfterLast("_").padEnd(4)} $label")
         }

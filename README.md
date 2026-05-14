@@ -7,7 +7,7 @@ Cogent is a Kotlin agent runtime that brings UI-runtime abstractions — Snapsho
 **v0.6** focuses on **execution observability infrastructure**: making agent execution observable, navigable, and analyzable through a DAG-based timeline model with graph-native query capabilities.  
 **v0.7** (in progress) adds a **Visual Runtime Inspector** — a Compose-based desktop UI for timeline visualization, state inspection, and execution replay.
 
-The project is organized as a **5-module Gradle project**:
+The project is organized as a **6-module Gradle project**:
 
 | Module | Responsibility | Status |
 |--------|---------------|--------|
@@ -15,7 +15,8 @@ The project is organized as a **5-module Gradle project**:
 | `kagent-protocol` | Execution protocol (execute/stream/trace) | ✅ Stable |
 | `kagent-debugger` | Debug & timeline analysis (DAG, query engine) | ✅ Maturing |
 | `kagent-inspector` | Visual runtime inspector UI | 🧠 v0.7 |
-| `kagent-demo` | Demo applications | 🔄 Evolving |
+| `kagent-examples` | Runnable agent examples (chat, tools, timeline) | 🔄 Evolving |
+| `kagent-demo` | API walkthrough demo | 🔄 Evolving |
 
 ## Quick Start
 
@@ -428,7 +429,7 @@ runtime.addRuntimeInterceptor { request, chain ->
 
 ## Modules
 
-The project is a **5-module Gradle project**. See the [Module Architecture](#architecture-overview) section above for the dependency graph and lifecycle alignment.
+The project is a **6-module Gradle project**. See the [Module Architecture](#architecture-overview) section above for the dependency graph and lifecycle alignment.
 
 | Gradle module | Public API | Internal components |
 |---------------|-----------|-------------------|
@@ -436,7 +437,8 @@ The project is a **5-module Gradle project**. See the [Module Architecture](#arc
 | `kagent-protocol` | `KAgentRuntime`, `kAgentRuntime()`, `AgentRequest/Response`, `RuntimeEvent`, `RuntimeState`, `StateChange`, `RuntimeSnapshot`, `StepInterceptor`, `RuntimeInterceptor` | `EventStore` |
 | `kagent-debugger` | `RuntimeDebugger`, `TimelineGraph`, `TimelineNode`, `TimelineEdge`, `EdgeType`, `TimelineIndices`, `TimelineQueryEngine`, `EventFilter`, `ExecutionSpan` | `TimelineBuilder`, `TimelineProjection` |
 | `kagent-inspector` | *(v0.7 — Visual Runtime Inspector)* | *(Compose/Skia Desktop UI)* |
-| `kagent-demo` | — | Demo applications |
+| `kagent-examples` | `ChatAgent`, `ChatTool` | `ChatRunner` (interactive REPL) |
+| `kagent-demo` | — | API walkthrough demo |
 
 ### Internal Runtime Components
 
@@ -512,11 +514,14 @@ This design ensures:
 ## Building
 
 ```bash
-# Build and test
+# Build and test all modules
 ./gradlew clean test
 
-# Run demo
-./gradlew run
+# Run API walkthrough demo
+./gradlew :kagent-demo:run
+
+# Run debuggable chat agent (interactive)
+./gradlew :kagent-examples:run
 
 # Build JAR
 ./gradlew build

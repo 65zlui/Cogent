@@ -433,6 +433,58 @@ class KAgentRuntimeScope internal constructor(
         heart.replayToCheckpoint(name)
     }
 
+    /**
+     * Emit a [RuntimeEvent.ToolCall] for timeline tracking.
+     * Creates a timeline node linked via [EdgeType.TOOL_FLOW] to
+     * the corresponding [toolResult] call.
+     *
+     * @param name  Tool name (e.g. "search", "calculator")
+     * @param input The input passed to the tool
+     */
+    suspend fun toolCall(name: String, input: String) {
+        onEvent(RuntimeEvent.ToolCall(name, input))
+    }
+
+    /**
+     * Emit a [RuntimeEvent.ToolResult] for timeline tracking.
+     * Paired with a preceding [toolCall] — creates a TOOL_FLOW edge
+     * in the timeline DAG.
+     *
+     * @param name   Tool name matching the preceding [toolCall]
+     * @param output The result returned by the tool
+     */
+    suspend fun toolResult(name: String, output: String) {
+        onEvent(RuntimeEvent.ToolResult(name, output))
+    }
+
+    /**
+     * Emit a [RuntimeEvent.StreamStart] for timeline tracking.
+     * Marks the beginning of a streaming output sequence.
+     * Linked to subsequent [streamDelta] and [streamEnd] via
+     * [EdgeType.STREAM_FLOW] edges.
+     */
+    suspend fun streamStart(provider: String? = null, model: String? = null) {
+        onEvent(RuntimeEvent.StreamStart(provider, model))
+    }
+
+    /**
+     * Emit a [RuntimeEvent.StreamDelta] for timeline tracking.
+     * Represents a windowed chunk of streaming output.
+     * Linked to the preceding [streamStart] via a STREAM_FLOW edge.
+     */
+    suspend fun streamDelta(accumulated: String, deltaContent: String) {
+        onEvent(RuntimeEvent.StreamDelta(accumulated, deltaContent))
+    }
+
+    /**
+     * Emit a [RuntimeEvent.StreamEnd] for timeline tracking.
+     * Marks the end of a streaming output sequence.
+     * Linked to the preceding [streamStart] via a STREAM_FLOW edge.
+     */
+    suspend fun streamEnd(totalLength: Int, model: String? = null) {
+        onEvent(RuntimeEvent.StreamEnd(totalLength, model))
+    }
+
     fun getMemory(): Memory = heart.getMemory()
     fun getScheduler(): AgentScheduler = heart.getScheduler()
 }

@@ -10,6 +10,7 @@ kotlin {
 dependencies {
     implementation(project(":kagent-debugger"))
     implementation(project(":kagent-protocol"))
+    implementation(project(":kagent-inspector"))
     implementation("org.jetbrains.kotlinx:kotlinx-coroutines-core:1.10.2")
 }
 

@@ -1,5 +1,6 @@
 package com.cogent.demo
 
+import com.cogent.inspector.InspectorServer
 import com.cogent.runtime.*
 import kotlinx.coroutines.flow.toList
 import kotlinx.coroutines.runBlocking
@@ -171,4 +172,19 @@ fun main() = runBlocking {
     println("║    kagent-debugger    timeline/query/debug APIs            ║")
     println("║    kagent-inspector   visual UI (v0.7)                    ║")
     println("╚══════════════════════════════════════════════════════════╝")
+
+    // ================================================================
+    // 8. Start Web Inspector (v0.7)
+    // ================================================================
+    println()
+    println("── 8. Start Web Inspector ──────────────────────────────────")
+    val inspector = InspectorServer(dbg, port = 3000)
+    inspector.start()
+    println()
+    println("Open http://localhost:3000 in your browser to view the DAG.")
+    println("Press Ctrl+C to stop.")
+    println()
+
+    // Keep the process alive for the inspector
+    kotlinx.coroutines.delay(Long.MAX_VALUE)
 }

@@ -1,0 +1,841 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Cogent Inspector</title>
+<script src="https://d3js.org/d3.v7.min.js"></script>
+<style>
+:root {
+  --bg: #1a1b26;
+  --surface: #24283b;
+  --border: #414868;
+  --text: #c0caf5;
+  --text-dim: #565f89;
+  --accent: #7aa2f7;
+  --success: #73daca;
+  --warn: #e0af68;
+  --error: #f7768e;
+  --purple: #bb9af7;
+  --orange: #ff9e64;
+  --green: #9ece6a;
+
+  /* Event type colors */
+  --c-run:    #414868;
+  --c-step:   #7aa2f7;
+  --c-memory: #e0af68;
+  --c-derived:#bb9af7;
+  --c-tool:   #ff9e64;
+  --c-stream: #73daca;
+
+  font-family: 'SF Mono', 'Fira Code', 'Cascadia Code', monospace;
+  font-size: 13px;
+  color: var(--text);
+  background: var(--bg);
+}
+
+* { margin: 0; padding: 0; box-sizing: border-box; }
+body { height: 100vh; display: flex; flex-direction: column; overflow: hidden; }
+
+/* ── Header ─────────────────────────────────────────────── */
+header {
+  display: flex; align-items: center; gap: 16px;
+  padding: 10px 20px;
+  background: var(--surface);
+  border-bottom: 1px solid var(--border);
+  flex-shrink: 0;
+}
+header h1 { font-size: 16px; font-weight: 600; color: var(--accent); }
+header span.subtitle { color: var(--text-dim); font-size: 11px; }
+#refreshBtn {
+  margin-left: auto;
+  background: var(--accent); color: var(--bg);
+  border: none; padding: 5px 14px; border-radius: 4px;
+  cursor: pointer; font-size: 12px; font-family: inherit;
+}
+#refreshBtn:hover { opacity: 0.85; }
+
+/* ── Layout ──────────────────────────────────────────────── */
+.layout {
+  display: flex; flex: 1; overflow: hidden;
+}
+
+/* ── Sidebar (trace list) ──────────────────────────────── */
+.sidebar {
+  width: 220px; min-width: 220px;
+  background: var(--surface);
+  border-right: 1px solid var(--border);
+  display: flex; flex-direction: column;
+  overflow: hidden;
+}
+.sidebar h2 {
+  font-size: 11px; text-transform: uppercase; letter-spacing: 1px;
+  color: var(--text-dim); padding: 12px 16px 8px;
+  border-bottom: 1px solid var(--border);
+  flex-shrink: 0;
+}
+#traceList {
+  list-style: none; overflow-y: auto; flex: 1;
+}
+#traceList li {
+  padding: 8px 16px; cursor: pointer;
+  border-left: 3px solid transparent;
+  font-size: 12px;
+  transition: all 0.15s;
+  word-break: break-all;
+}
+#traceList li:hover { background: rgba(122,162,247,0.1); }
+#traceList li.active {
+  background: rgba(122,162,247,0.15);
+  border-left-color: var(--accent);
+  color: var(--accent);
+}
+#traceList li .ts { color: var(--text-dim); font-size: 10px; display: block; }
+
+/* ── Main content ────────────────────────────────────────── */
+.main-content {
+  flex: 1; display: flex; flex-direction: column; overflow: hidden;
+}
+
+.toolbar {
+  display: flex; align-items: center; gap: 12px;
+  padding: 6px 16px;
+  background: var(--surface);
+  border-bottom: 1px solid var(--border);
+  flex-shrink: 0; flex-wrap: wrap;
+  font-size: 11px;
+}
+.toolbar label { display: flex; align-items: center; gap: 3px; cursor: pointer; }
+.toolbar input[type="checkbox"] { accent-color: var(--accent); }
+.toolbar .sep { color: var(--text-dim); }
+.toolbar input[type="range"] {
+  width: 100px; accent-color: var(--accent);
+  vertical-align: middle;
+}
+.toolbar #versionLabel {
+  display: inline-block; min-width: 24px; text-align: center;
+  font-variant-numeric: tabular-nums;
+}
+.toolbar #edgeCount { color: var(--text-dim); margin-left: auto; }
+
+/* ── DAG canvas ──────────────────────────────────────────── */
+#dag-container {
+  flex: 1; overflow: hidden; position: relative;
+  background: var(--bg);
+}
+#dag-container svg { width: 100%; height: 100%; display: block; }
+
+/* D3 node / edge styles */
+.dag-node rect, .dag-node circle {
+  stroke-width: 1.5;
+  cursor: pointer;
+  transition: opacity 0.15s;
+}
+.dag-node text {
+  fill: var(--text);
+  font-size: 10px;
+  pointer-events: none;
+  font-family: inherit;
+}
+.dag-node .label-main { font-weight: 600; }
+.dag-node .label-sub { fill: var(--text-dim); font-size: 9px; }
+.dag-edge path {
+  fill: none;
+  stroke-width: 1.5;
+  cursor: pointer;
+  transition: opacity 0.15s;
+}
+.dag-edge path:hover { stroke-width: 2.5; }
+.edge-SEQUENTIAL  { stroke: #565f89; stroke-dasharray: none; }
+.edge-CAUSAL      { stroke: #7aa2f7; stroke-dasharray: 5,3; }
+.edge-TOOL_FLOW   { stroke: #ff9e64; stroke-dasharray: none; }
+.edge-STREAM_FLOW { stroke: #73daca; stroke-dasharray: 3,3; }
+
+/* Tooltip */
+#tooltip {
+  position: absolute; display: none;
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  padding: 6px 10px;
+  font-size: 11px;
+  pointer-events: none;
+  z-index: 100;
+  max-width: 300px;
+  box-shadow: 0 4px 12px rgba(0,0,0,0.4);
+}
+
+/* ── No-data placeholder ─────────────────────────────────── */
+#placeholder {
+  position: absolute; top: 50%; left: 50%;
+  transform: translate(-50%, -50%);
+  text-align: center;
+  color: var(--text-dim);
+  font-size: 13px;
+}
+#placeholder .big { font-size: 32px; display: block; margin-bottom: 8px; }
+
+/* ── Detail panel ────────────────────────────────────────── */
+.detail-panel {
+  width: 0; overflow: hidden;
+  background: var(--surface);
+  border-left: 1px solid var(--border);
+  transition: width 0.2s;
+  display: flex; flex-direction: column;
+}
+.detail-panel.open { width: 340px; min-width: 340px; }
+
+.detail-panel h2 {
+  font-size: 11px; text-transform: uppercase; letter-spacing: 1px;
+  color: var(--text-dim); padding: 12px 16px 8px;
+  border-bottom: 1px solid var(--border);
+  flex-shrink: 0;
+}
+.detail-panel .close-btn {
+  float: right; cursor: pointer; color: var(--text-dim);
+  font-size: 14px; font-family: inherit;
+  background: none; border: none;
+}
+.detail-panel .close-btn:hover { color: var(--text); }
+
+#detailContent {
+  padding: 12px 16px; overflow-y: auto; flex: 1;
+  font-size: 12px;
+}
+#detailContent .field { margin-bottom: 8px; }
+#detailContent .field .key {
+  color: var(--text-dim); font-size: 10px;
+  text-transform: uppercase; letter-spacing: 0.5px;
+}
+#detailContent .field .val {
+  color: var(--text); word-break: break-all;
+  margin-top: 1px;
+}
+#detailContent h3 {
+  font-size: 10px; text-transform: uppercase; letter-spacing: 0.5px;
+  color: var(--text-dim);
+  margin: 14px 0 6px; padding-top: 10px;
+  border-top: 1px solid var(--border);
+}
+#detailContent ul { list-style: none; }
+#detailContent ul li {
+  padding: 2px 0; font-size: 11px; cursor: pointer;
+}
+#detailContent ul li:hover { color: var(--accent); }
+#detailContent .node-link {
+  color: var(--accent); cursor: pointer;
+}
+#detailContent .node-link:hover { text-decoration: underline; }
+
+#statePre {
+  background: var(--bg); padding: 8px; border-radius: 4px;
+  font-size: 10px; overflow-x: auto; white-space: pre-wrap;
+  max-height: 200px; overflow-y: auto;
+  border: 1px solid var(--border);
+}
+
+/* Legend */
+#legend {
+  position: absolute; bottom: 12px; left: 12px;
+  background: rgba(36,40,59,0.9);
+  border: 1px solid var(--border);
+  border-radius: 4px; padding: 8px 10px;
+  font-size: 10px;
+  display: grid;
+  grid-template-columns: auto auto;
+  gap: 3px 12px;
+}
+#legend .swatch { display: inline-block; width: 10px; height: 10px; border-radius: 2px; margin-right: 4px; vertical-align: middle; }
+</style>
+</head>
+<body>
+
+<header>
+  <h1>&#9670; Cogent Inspector</h1>
+  <span class="subtitle">execution observability runtime</span>
+  <button id="refreshBtn">&#8635; Refresh</button>
+</header>
+
+<div class="layout">
+
+  <!-- Sidebar -->
+  <aside class="sidebar">
+    <h2>Traces</h2>
+    <ul id="traceList"></ul>
+  </aside>
+
+  <!-- Main -->
+  <div class="main-content">
+    <div class="toolbar">
+      <span style="color:var(--text-dim)">Edges:</span>
+      <label><input type="checkbox" data-edge="SEQUENTIAL" checked> SEQ</label>
+      <label><input type="checkbox" data-edge="CAUSAL" checked> CAU</label>
+      <label><input type="checkbox" data-edge="TOOL_FLOW" checked> TOOL</label>
+      <label><input type="checkbox" data-edge="STREAM_FLOW" checked> STRM</label>
+      <span class="sep">|</span>
+      <label>Version: <input type="range" id="versionSlider" min="0" max="1" value="1" step="1"></label>
+      <span id="versionLabel">1</span>
+      <span id="edgeCount"></span>
+    </div>
+    <div id="dag-container">
+      <div id="placeholder">
+        <span class="big">&#9670;</span>
+        Select a trace from the sidebar to view its DAG
+      </div>
+      <svg id="dag-svg"></svg>
+      <div id="legend"></div>
+    </div>
+  </div>
+
+  <!-- Detail panel -->
+  <aside class="detail-panel" id="detailPanel">
+    <h2>
+      Node Detail
+      <button class="close-btn" id="closeDetail">&times;</button>
+    </h2>
+    <div id="detailContent">
+      <div style="color:var(--text-dim);padding:16px;text-align:center">Click a node to inspect</div>
+    </div>
+  </aside>
+
+</div>
+
+<div id="tooltip"></div>
+
+<script>
+// ════════════════════════════════════════════════════════════════
+// Cogent Inspector — D3.js DAG Visualization
+// ════════════════════════════════════════════════════════════════
+
+// ── State ──────────────────────────────────────────────────
+const state = {
+  traces: [],
+  currentTraceId: null,
+  graph: null,          // raw graph from API
+  selectedNodeId: null,
+  version: Infinity,
+  edgeFilter: { SEQUENTIAL: true, CAUSAL: true, TOOL_FLOW: true, STREAM_FLOW: true },
+};
+
+// ── DOM refs ───────────────────────────────────────────────
+const $ = (s) => document.querySelector(s);
+const traceList = $('#traceList');
+const dagSvg = $('#dag-svg');
+const dagContainer = $('#dag-container');
+const tooltip = $('#tooltip');
+const versionSlider = $('#versionSlider');
+const versionLabel = $('#versionLabel');
+const detailPanel = $('#detailPanel');
+const detailContent = $('#detailContent');
+const closeDetail = $('#closeDetail');
+const edgeCount = $('#edgeCount');
+const placeholder = $('#placeholder');
+const legend = $('#legend');
+
+// ── Event type styling ─────────────────────────────────────
+const EVENT_COLORS = {
+  RunStart:    { bg: '#414868', border: '#565f89' },
+  RunEnd:      { bg: '#414868', border: '#565f89' },
+  StepStart:   { bg: 'rgba(122,162,247,0.2)', border: '#7aa2f7' },
+  StepEnd:     { bg: 'rgba(122,162,247,0.2)', border: '#7aa2f7' },
+  MemoryChange:   { bg: 'rgba(224,175,104,0.2)', border: '#e0af68' },
+  DerivedRecompute:{ bg: 'rgba(187,154,247,0.2)', border: '#bb9af7' },
+  ToolCall:    { bg: 'rgba(255,158,100,0.2)', border: '#ff9e64' },
+  ToolResult:  { bg: 'rgba(255,158,100,0.2)', border: '#ff9e64' },
+  StreamStart: { bg: 'rgba(115,218,202,0.2)', border: '#73daca' },
+  StreamDelta: { bg: 'rgba(115,218,202,0.2)', border: '#73daca' },
+  StreamEnd:   { bg: 'rgba(115,218,202,0.2)', border: '#73daca' },
+};
+
+const EDGE_COLORS = {
+  SEQUENTIAL:  '#565f89',
+  CAUSAL:      '#7aa2f7',
+  TOOL_FLOW:   '#ff9e64',
+  STREAM_FLOW: '#73daca',
+};
+
+// Legend data
+const LEGEND_ITEMS = [
+  { label: 'RunStart/End', color: '#565f89' },
+  { label: 'StepStart/End', color: '#7aa2f7' },
+  { label: 'MemoryChange', color: '#e0af68' },
+  { label: 'Derived', color: '#bb9af7' },
+  { label: 'ToolCall/Result', color: '#ff9e64' },
+  { label: 'Stream', color: '#73daca' },
+];
+
+// ── API ────────────────────────────────────────────────────
+async function apiFetch(path) {
+  const res = await fetch(path);
+  if (!res.ok) throw new Error(`API ${res.status}: ${path}`);
+  return res.json();
+}
+
+async function apiPost(path, body) {
+  const res = await fetch(path, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(body),
+  });
+  if (!res.ok) throw new Error(`API ${res.status}: ${path}`);
+  return res.json();
+}
+
+// ── Trace list ─────────────────────────────────────────────
+async function loadTraces() {
+  try {
+    state.traces = await apiFetch('/api/traces');
+    renderTraceList();
+    // Auto-select first trace if none selected
+    if (state.traces.length > 0 && !state.currentTraceId) {
+      selectTrace(state.traces[0]);
+    }
+  } catch (e) {
+    traceList.innerHTML = `<li style="color:var(--error)">Error: ${e.message}</li>`;
+  }
+}
+
+function renderTraceList() {
+  traceList.innerHTML = '';
+  for (const tid of state.traces) {
+    const li = document.createElement('li');
+    li.textContent = tid;
+    if (tid === state.currentTraceId) li.classList.add('active');
+    li.addEventListener('click', () => selectTrace(tid));
+    traceList.appendChild(li);
+  }
+}
+
+async function selectTrace(traceId) {
+  state.currentTraceId = traceId;
+  renderTraceList();
+  placeholder.style.display = 'none';
+  try {
+    const graph = await apiFetch(`/api/traces/${traceId}`);
+    state.graph = graph;
+    state.version = graph.nodeCount;
+    versionSlider.max = graph.nodeCount;
+    versionSlider.value = graph.nodeCount;
+    versionLabel.textContent = graph.nodeCount;
+    render();
+  } catch (e) {
+    dagSvg.innerHTML = `<text x="20" y="30" fill="var(--error)" font-size="12" font-family="monospace">Error: ${e.message}</text>`;
+  }
+}
+
+// ── DAG Layout Algorithm ───────────────────────────────────
+function computeLayout(graph, edgeFilter) {
+  const nodes = graph.nodes;
+  const edges = graph.edges.filter(e => edgeFilter[e.type]);
+
+  // Build adjacency for topological sort
+  const adj = {};
+  const inDeg = {};
+  for (const n of nodes) { adj[n.id] = []; inDeg[n.id] = 0; }
+  for (const e of edges) {
+    adj[e.fromNodeId] = adj[e.fromNodeId] || [];
+    adj[e.fromNodeId].push(e.toNodeId);
+    inDeg[e.toNodeId] = (inDeg[e.toNodeId] || 0) + 1;
+  }
+
+  // Kahn's algorithm for topological sort
+  const queue = nodes.filter(n => (inDeg[n.id] || 0) === 0).map(n => n.id);
+  const topo = [];
+  while (queue.length > 0) {
+    const id = queue.shift();
+    topo.push(id);
+    for (const child of (adj[id] || [])) {
+      inDeg[child]--;
+      if (inDeg[child] === 0) queue.push(child);
+    }
+  }
+
+  // Assign layers via longest-path DP
+  const layer = {};
+  for (const id of topo) layer[id] = 0;
+  for (const id of topo) {
+    const l = layer[id] || 0;
+    for (const child of (adj[id] || [])) {
+      layer[child] = Math.max(layer[child] || 0, l + 1);
+    }
+  }
+
+  // Group by layer
+  const layers = {};
+  let maxLayer = 0;
+  for (const n of nodes) {
+    const l = layer[n.id] || 0;
+    if (!layers[l]) layers[l] = [];
+    layers[l].push(n.id);
+    maxLayer = Math.max(maxLayer, l);
+  }
+
+  // Position
+  const margin = { top: 40, left: 80, right: 80, bottom: 40 };
+  const svgRect = dagContainer.getBoundingClientRect();
+  const w = Math.max(600, svgRect.width - margin.left - margin.right);
+  const h = Math.max(400, (maxLayer + 1) * 90);
+  const nodeW = 160, nodeH = 34;
+
+  const positions = {};
+  for (let l = 0; l <= maxLayer; l++) {
+    const ids = layers[l] || [];
+    const y = margin.top + l * 90 + 20;
+    const totalW = ids.length * (nodeW + 20) - 20;
+    const startX = margin.left + (w - totalW) / 2;
+    ids.forEach((id, i) => {
+      positions[id] = { x: startX + i * (nodeW + 20) + nodeW / 2, y };
+    });
+  }
+
+  return { positions, nodeW, nodeH, svgW: w + margin.left + margin.right, svgH: h + margin.top + margin.bottom, topo };
+}
+
+// ── Rendering ──────────────────────────────────────────────
+let zoomBehavior = null;
+
+function render() {
+  if (!state.graph) return;
+
+  const graph = state.graph;
+  const filteredNodes = graph.nodes.filter(n => n.stateVersion <= state.version);
+  const filteredNodeIds = new Set(filteredNodes.map(n => n.id));
+  const filteredEdges = graph.edges.filter(e =>
+    state.edgeFilter[e.type] &&
+    filteredNodeIds.has(e.fromNodeId) &&
+    filteredNodeIds.has(e.toNodeId)
+  );
+  const filteredGraph = { nodes: filteredNodes, edges: filteredEdges };
+
+  if (filteredNodes.length === 0) {
+    dagSvg.innerHTML = '';
+    return;
+  }
+
+  // Compute layout on filtered graph
+  const { positions, nodeW, nodeH, svgW, svgH, topo } = computeLayout(filteredGraph, state.edgeFilter);
+
+  // Set SVG dimensions
+  dagSvg.setAttribute('viewBox', `0 0 ${svgW} ${svgH}`);
+
+  // Clear previous content
+  dagSvg.innerHTML = '';
+  const svg = d3.select(dagSvg);
+
+  // Zoom behavior
+  if (zoomBehavior) svg.on('.zoom', null);
+  zoomBehavior = d3.zoom()
+    .scaleExtent([0.2, 3])
+    .on('zoom', (event) => {
+      g.attr('transform', event.transform);
+    });
+  svg.call(zoomBehavior);
+
+  const g = svg.append('g').attr('class', 'dag-root');
+
+  // ── Edges ──
+  const edgeGroup = g.append('g').attr('class', 'edges');
+  for (const e of filteredEdges) {
+    const from = positions[e.fromNodeId];
+    const to = positions[e.toNodeId];
+    if (!from || !to) continue;
+
+    const x1 = from.x, y1 = from.y + nodeH / 2;
+    const x2 = to.x, y2 = to.y - nodeH / 2;
+
+    // Curved path
+    const mx = (x1 + x2) / 2;
+    const path = edgeGroup.append('path')
+      .attr('d', `M ${x1} ${y1} C ${mx} ${y1 + 15}, ${mx} ${y2 - 15}, ${x2} ${y2}`)
+      .attr('class', `edge-${e.type}`)
+      .attr('data-from', e.fromNodeId)
+      .attr('data-to', e.toNodeId)
+      .style('opacity', 0.6);
+
+    // Arrow marker
+    const angle = Math.atan2(y2 - (y1 + 30), x2 - x1) * 180 / Math.PI;
+    path.attr('marker-end', `url(#arrow-${e.type})`);
+  }
+
+  // Arrow markers
+  for (const et of ['SEQUENTIAL','CAUSAL','TOOL_FLOW','STREAM_FLOW']) {
+    const defs = svg.select('defs').empty() ? svg.append('defs') : svg.select('defs');
+    defs.append('marker')
+      .attr('id', `arrow-${et}`)
+      .attr('viewBox', '0 -5 10 10')
+      .attr('refX', 8)
+      .attr('refY', 0)
+      .attr('markerWidth', 6)
+      .attr('markerHeight', 6)
+      .attr('orient', 'auto')
+      .append('path')
+      .attr('d', 'M0,-5L10,0L0,5')
+      .attr('fill', EDGE_COLORS[et] || '#565f89');
+  }
+
+  // ── Nodes ──
+  const nodeGroup = g.append('g').attr('class', 'nodes');
+  for (const n of filteredNodes) {
+    const pos = positions[n.id];
+    if (!pos) continue;
+    const col = EVENT_COLORS[n.event.type] || { bg: 'var(--surface)', border: 'var(--border)' };
+    const isSelected = n.id === state.selectedNodeId;
+
+    const grp = nodeGroup.append('g')
+      .attr('class', 'dag-node')
+      .attr('transform', `translate(${pos.x - nodeW / 2}, ${pos.y - nodeH / 2})`);
+
+    // Node rect
+    grp.append('rect')
+      .attr('width', nodeW)
+      .attr('height', nodeH)
+      .attr('rx', 4)
+      .attr('ry', 4)
+      .attr('fill', col.bg)
+      .attr('stroke', isSelected ? '#ffffff' : col.border)
+      .attr('stroke-width', isSelected ? 2.5 : 1.5)
+      .style('cursor', 'pointer');
+
+    // Label: event type
+    grp.append('text')
+      .attr('class', 'label-main')
+      .attr('x', 8)
+      .attr('y', 14)
+      .text(n.event.type);
+
+    // Label: subtype (stepId, key, tool, etc.)
+    const sub = eventSubtitle(n.event);
+    grp.append('text')
+      .attr('class', 'label-sub')
+      .attr('x', 8)
+      .attr('y', 26)
+      .text(sub ? truncate(sub, 22) : '');
+
+    // Version badge
+    grp.append('text')
+      .attr('x', nodeW - 4)
+      .attr('y', 12)
+      .attr('text-anchor', 'end')
+      .attr('fill', 'var(--text-dim)')
+      .attr('font-size', '8px')
+      .text(`v${n.stateVersion}`);
+
+    // Hover
+    grp.on('mouseenter', (event) => showTooltip(event, n))
+       .on('mouseleave', () => hideTooltip());
+
+    // Click
+    grp.on('click', () => selectNode(n.id));
+  }
+}
+
+// ── Helpers ────────────────────────────────────────────────
+function eventSubtitle(event) {
+  switch (event.type) {
+    case 'StepStart': case 'StepEnd': return event.stepId;
+    case 'MemoryChange': return event.key;
+    case 'DerivedRecompute': return event.key;
+    case 'ToolCall': return event.tool;
+    case 'ToolResult': return event.tool;
+    case 'StreamStart': return event.provider || 'stream';
+    case 'StreamDelta': return `${event.deltaContent.length}c`;
+    case 'StreamEnd': return `${event.totalLength}c`;
+    case 'RunStart': case 'RunEnd': return truncate(event.traceId, 20);
+    default: return '';
+  }
+}
+
+function truncate(s, max) {
+  if (!s) return '';
+  return s.length > max ? s.substring(0, max-1) + '\u2026' : s;
+}
+
+function showTooltip(event, node) {
+  const ev = node.event;
+  let html = `<strong>${ev.type}</strong> <span style="color:var(--text-dim)">v${node.stateVersion}</span><br>`;
+  switch (ev.type) {
+    case 'StepStart': case 'StepEnd': html += `stepId: ${ev.stepId}`; break;
+    case 'MemoryChange': html += `${escapeHtml(ev.key)}: ${escapeHtml(JSON.stringify(ev.newValue))}`; break;
+    case 'ToolCall': html += `${ev.tool}(${escapeHtml(truncate(ev.input, 40))})`; break;
+    case 'ToolResult': html += `${ev.tool} = ${escapeHtml(truncate(ev.output, 60))}`; break;
+    case 'StreamStart': html += `provider: ${ev.provider || '-'}`; break;
+    case 'StreamDelta': html += `+${ev.deltaContent.length} chars (${ev.accumulated.length} total)`; break;
+    case 'StreamEnd': html += `${ev.totalLength} chars, model: ${ev.model || '-'}`; break;
+    case 'RunStart': case 'RunEnd': html += `trace: ${truncate(ev.traceId, 30)}`; break;
+    case 'DerivedRecompute': html += `key: ${ev.key}`; break;
+  }
+  tooltip.innerHTML = html;
+  tooltip.style.display = 'block';
+  const rect = dagContainer.getBoundingClientRect();
+  tooltip.style.left = (event.clientX - rect.left + 12) + 'px';
+  tooltip.style.top = (event.clientY - rect.top - 10) + 'px';
+}
+
+function hideTooltip() { tooltip.style.display = 'none'; }
+
+function escapeHtml(s) {
+  if (typeof s !== 'string') return String(s);
+  return s.replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');
+}
+
+// ── Node selection & detail panel ──────────────────────────
+async function selectNode(nodeId) {
+  state.selectedNodeId = nodeId;
+  render(); // re-render to update selection highlight
+
+  detailPanel.classList.add('open');
+  detailContent.innerHTML = '<div style="color:var(--text-dim)">Loading...</div>';
+
+  try {
+    const data = await apiFetch(`/api/nodes/${nodeId}`);
+    renderDetail(data);
+  } catch (e) {
+    detailContent.innerHTML = `<div style="color:var(--error)">Error: ${e.message}</div>`;
+  }
+}
+
+function renderDetail(data) {
+  const node = data.node;
+  const ev = node.event;
+  let html = '';
+
+  // Event fields
+  html += `<div class="field"><div class="key">Type</div><div class="val">${ev.type}</div></div>`;
+  html += `<div class="field"><div class="key">State Version</div><div class="val">${node.stateVersion}</div></div>`;
+  html += `<div class="field"><div class="key">Timestamp</div><div class="val">${new Date(node.timestamp).toISOString()}</div></div>`;
+
+  switch (ev.type) {
+    case 'StepStart': case 'StepEnd':
+      html += `<div class="field"><div class="key">Step ID</div><div class="val">${ev.stepId}</div></div>`;
+      break;
+    case 'MemoryChange':
+      html += `<div class="field"><div class="key">Key</div><div class="val">${escapeHtml(ev.key)}</div></div>`;
+      html += `<div class="field"><div class="key">Old Value</div><div class="val">${escapeHtml(JSON.stringify(ev.oldValue, null, 2))}</div></div>`;
+      html += `<div class="field"><div class="key">New Value</div><div class="val">${escapeHtml(JSON.stringify(ev.newValue, null, 2))}</div></div>`;
+      break;
+    case 'DerivedRecompute':
+      html += `<div class="field"><div class="key">Key</div><div class="val">${ev.key}</div></div>`;
+      break;
+    case 'ToolCall':
+      html += `<div class="field"><div class="key">Tool</div><div class="val">${ev.tool}</div></div>`;
+      html += `<div class="field"><div class="key">Input</div><div class="val">${escapeHtml(ev.input)}</div></div>`;
+      break;
+    case 'ToolResult':
+      html += `<div class="field"><div class="key">Tool</div><div class="val">${ev.tool}</div></div>`;
+      html += `<div class="field"><div class="key">Output</div><div class="val" style="white-space:pre-wrap">${escapeHtml(truncate(ev.output, 200))}</div></div>`;
+      break;
+    case 'StreamStart':
+      html += `<div class="field"><div class="key">Provider</div><div class="val">${ev.provider || '-'}</div></div>`;
+      html += `<div class="field"><div class="key">Model</div><div class="val">${ev.model || '-'}</div></div>`;
+      break;
+    case 'StreamDelta':
+      html += `<div class="field"><div class="key">Accumulated</div><div class="val">${ev.accumulated.length} chars</div></div>`;
+      html += `<div class="field"><div class="key">Delta</div><div class="val">${ev.deltaContent.length} chars: ${escapeHtml(truncate(ev.deltaContent, 80))}</div></div>`;
+      break;
+    case 'StreamEnd':
+      html += `<div class="field"><div class="key">Total Length</div><div class="val">${ev.totalLength} chars</div></div>`;
+      html += `<div class="field"><div class="key">Model</div><div class="val">${ev.model || '-'}</div></div>`;
+      break;
+    case 'RunStart': case 'RunEnd':
+      html += `<div class="field"><div class="key">Trace ID</div><div class="val">${ev.traceId}</div></div>`;
+      break;
+  }
+
+  // Children
+  html += `<h3>Children (${data.children.length})</h3><ul>`;
+  if (data.children.length === 0) {
+    html += '<li style="color:var(--text-dim)">none</li>';
+  } else {
+    for (const child of data.children) {
+      html += `<li><span class="node-link" data-node-id="${child.id}">${child.event.type} #${child.id.split('_').slice(-2,-1)}</span></li>`;
+    }
+  }
+  html += '</ul>';
+
+  // Parents
+  html += `<h3>Parents (${data.parents.length})</h3><ul>`;
+  if (data.parents.length === 0) {
+    html += '<li style="color:var(--text-dim)">none</li>';
+  } else {
+    for (const parent of data.parents) {
+      html += `<li><span class="node-link" data-node-id="${parent.id}">${parent.event.type} #${parent.id.split('_').slice(-2,-1)}</span></li>`;
+    }
+  }
+  html += '</ul>';
+
+  // State at this version
+  html += `<h3>State at v${node.stateVersion}</h3>`;
+  html += `<div id="statePre">Loading...</div>`;
+
+  detailContent.innerHTML = html;
+
+  // Click handlers for node links
+  detailContent.querySelectorAll('.node-link').forEach(el => {
+    el.addEventListener('click', () => selectNode(el.dataset.nodeId));
+  });
+
+  // Load state for this version
+  loadStateAtVersion(data.node.traceId, node.stateVersion);
+}
+
+async function loadStateAtVersion(traceId, version) {
+  const el = document.getElementById('statePre');
+  if (!el) return;
+  try {
+    const data = await apiPost('/api/state', { traceId, stateVersion: version });
+    const stateObj = data.state;
+    const keys = Object.keys(stateObj);
+    if (keys.length === 0) {
+      el.textContent = '(no MemoryChange events up to this version)';
+      return;
+    }
+    el.textContent = JSON.stringify(stateObj, null, 2);
+  } catch (e) {
+    el.textContent = `Error: ${e.message}`;
+  }
+}
+
+// ── Version slider ─────────────────────────────────────────
+versionSlider.addEventListener('input', () => {
+  state.version = parseInt(versionSlider.value);
+  versionLabel.textContent = state.version;
+  render();
+});
+
+// ── Edge filter toggles ────────────────────────────────────
+document.querySelectorAll('[data-edge]').forEach(cb => {
+  cb.addEventListener('change', () => {
+    state.edgeFilter[cb.dataset.edge] = cb.checked;
+    render();
+  });
+});
+
+// ── Close detail panel ─────────────────────────────────────
+closeDetail.addEventListener('click', () => {
+  detailPanel.classList.remove('open');
+  state.selectedNodeId = null;
+  render();
+});
+
+// ── Refresh ────────────────────────────────────────────────
+$('#refreshBtn').addEventListener('click', () => {
+  state.graph = null;
+  loadTraces();
+});
+
+// ── Render legend ──────────────────────────────────────────
+function renderLegend() {
+  legend.innerHTML = '';
+  for (const item of LEGEND_ITEMS) {
+    const div = document.createElement('div');
+    div.innerHTML = `<span class="swatch" style="background:${item.color}"></span>${item.label}`;
+    legend.appendChild(div);
+  }
+}
+renderLegend();
+
+// ── Init ───────────────────────────────────────────────────
+loadTraces();
+</script>
+</body>
+</html>

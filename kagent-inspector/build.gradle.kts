@@ -9,6 +9,7 @@ kotlin {
 dependencies {
     implementation(project(":kagent-debugger"))
     implementation(project(":kagent-protocol"))
+    implementation("org.json:json:20231013")
 }
 
 tasks.test {
